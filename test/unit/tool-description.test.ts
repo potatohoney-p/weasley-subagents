@@ -215,6 +215,7 @@ describe("registered subagent tool description", () => {
 
 	function readRegisteredDescription(agentDir: string): string {
 		const script = String.raw`
+			import { writeSync } from "node:fs";
 			import registerSubagentExtension from "./src/extension/index.ts";
 			const events = { on() { return () => {}; }, emit() {} };
 			let registeredTool;
@@ -234,7 +235,8 @@ describe("registered subagent tool description", () => {
 			});
 			registerSubagentExtension(fakePi);
 			if (!registeredTool) throw new Error("tool not registered");
-			process.stdout.write(JSON.stringify(registeredTool.description));
+			writeSync(1, JSON.stringify(registeredTool.description));
+			process.exit(0);
 		`;
 		const output = execFileSync(
 			process.execPath,

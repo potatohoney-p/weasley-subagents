@@ -27,6 +27,12 @@ export type AgentSource = "builtin" | "package" | "user" | "project";
 type SystemPromptMode = "append" | "replace";
 export type AgentDefaultContext = "fresh" | "fork";
 
+// Capture the process home before tests or embedding hosts temporarily override
+// HOME/USERPROFILE. The user's global .pi directory is configuration, not a
+// project root, even when a working directory happens to live below the home
+// directory (as Windows temporary directories commonly do).
+const PROCESS_HOME_DIR = path.resolve(os.homedir());
+
 export type AgentMemoryScope = "project" | "user";
 
 export interface AgentMemoryConfig {
@@ -590,6 +596,7 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 }
 
 function isProjectRootCandidate(dir: string): boolean {
+	if (path.resolve(dir) === PROCESS_HOME_DIR) return false;
 	return isDirectory(getProjectConfigDir(dir)) || isDirectory(path.join(dir, ".agents"));
 }
 

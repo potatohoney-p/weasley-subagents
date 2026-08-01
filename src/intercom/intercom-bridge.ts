@@ -12,7 +12,9 @@ function defaultAgentDir(): string {
 }
 
 function defaultSubagentConfigDir(agentDir = defaultAgentDir()): string {
-	return path.join(agentDir, "extensions", "subagent");
+	const preferred = path.join(agentDir, "extensions", "weasley-subagents");
+	const legacy = path.join(agentDir, "extensions", "subagent");
+	return fs.existsSync(preferred) || !fs.existsSync(legacy) ? preferred : legacy;
 }
 
 const DEFAULT_INTERCOM_TARGET_PREFIX = "subagent-chat";

@@ -174,6 +174,7 @@ describe("subagent extension child mode", () => {
 			fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ waitTool: { enabled: false } }), "utf-8");
 
 			const script = String.raw`
+				import { writeSync } from "node:fs";
 				import registerSubagentExtension from "./index.ts";
 				const events = { on() { return () => {}; }, emit() {} };
 				let subagentWaitTool;
@@ -199,7 +200,8 @@ describe("subagent extension child mode", () => {
 				if (!subagentWaitTool) throw new Error("subagent_wait tool not registered");
 				if (legacyWaitRegistered) throw new Error("legacy wait tool must not be registered");
 				const result = await subagentWaitTool.execute("subagent-wait-disabled", {}, new AbortController().signal, undefined, {});
-				process.stdout.write(JSON.stringify(result.content[0].text));
+				writeSync(1, JSON.stringify(result.content[0].text));
+				process.exit(0);
 			`;
 
 			const env = parentToolEnv();

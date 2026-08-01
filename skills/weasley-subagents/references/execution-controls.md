@@ -193,7 +193,7 @@ subagent({ action: "doctor" })
 
 ### Scheduled subagent runs
 
-Scheduled runs defer a subagent launch until a future time. They are opt-in and require `{ "scheduledRuns": { "enabled": true } }` in `~/.pi/agent/extensions/subagent/config.json`. Only schedule explicit delayed runs the user asked for; do not schedule runs speculatively.
+Scheduled runs defer a subagent launch until a future time. They are opt-in and require `{ "scheduledRuns": { "enabled": true } }` in `~/.pi/agent/extensions/weasley-subagents/config.json`. Only schedule explicit delayed runs the user asked for; do not schedule runs speculatively.
 
 ```typescript
 // Launch a reviewer in 30 minutes
