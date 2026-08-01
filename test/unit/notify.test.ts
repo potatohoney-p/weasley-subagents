@@ -1,0 +1,488 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { describe, it } from "node:test";
+import registerSubagentNotify, {
+	buildCompletionDetails,
+	formatGroupedCompletion,
+	formatSingleCompletion,
+	parseSubagentNotifyContent,
+	type RegisterSubagentNotifyOptions,
+	type SubagentNotifyDetails,
+} from "../../src/runs/background/notify.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT } from "../../src/shared/types.ts";
+
+function createEventBus() {
+	const emitter = new EventEmitter();
+	return {
+		on(event: string, listener: (...args: unknown[]) => void) {
+			emitter.on(event, listener);
+			return () => emitter.off(event, listener);
+		},
+		emit(event: string, ...args: unknown[]) {
+			return emitter.emit(event, ...args);
+		},
+		listenerCount(event: string) {
+			return emitter.listenerCount(event);
+		},
+	};
+}
+
+function createPi(currentSessionId = "session-1", registerOptions: RegisterSubagentNotifyOptions = {}) {
+	const events = createEventBus();
+	const sent: Array<{ message: unknown; options: unknown }> = [];
+	const pi = {
+		events,
+		sendMessage(message: unknown, options: unknown) {
+			sent.push({ message, options });
+		},
+	};
+
+	// Formatting-focused tests run with batching disabled so single completions
+	// emit synchronously. Batching behavior is covered by the dedicated suite below.
+	const notifier = registerSubagentNotify(pi as never, { currentSessionId }, { batchConfig: { enabled: false }, ...registerOptions });
+
+	return { events, sent, notifier, dispose: () => notifier.dispose() };
+}
+
+function createBatchingPi(clock: ReturnType<typeof createFakeClock>, currentSessionId = "session-a") {
+	const events = createEventBus();
+	const sent: Array<{ message: unknown; options: unknown }> = [];
+	const pi = {
+		events,
+		sendMessage(message: unknown, options: unknown) {
+			sent.push({ message, options });
+		},
+	};
+	const notifier = registerSubagentNotify(pi as never, { currentSessionId }, {
+		batchConfig: { enabled: true, debounceMs: 150, maxWaitMs: 1000, stragglerDebounceMs: 75, stragglerMaxWaitMs: 400, stragglerWindowMs: 2000 },
+		timers: clock.api,
+		now: clock.now,
+	});
+	return { events, sent, notifier, dispose: () => notifier.dispose() };
+}
+
+interface FakeJob {
+	id: number;
+	fireAt: number;
+	handler: () => void;
+}
+
+function createFakeClock() {
+	let now = 0;
+	let nextId = 1;
+	const jobs = new Map<number, FakeJob>();
+	const api = {
+		setTimeout(handler: () => void, delayMs: number): unknown {
+			const id = nextId++;
+			jobs.set(id, { id, fireAt: now + delayMs, handler });
+			return id;
+		},
+		clearTimeout(handle: unknown): void {
+			if (typeof handle === "number") jobs.delete(handle);
+		},
+	};
+	return {
+		api,
+		now: () => now,
+		advance(ms: number): void {
+			now += ms;
+			const due = [...jobs.values()].filter((job) => job.fireAt <= now).sort((a, b) => a.fireAt - b.fireAt);
+			for (const job of due) {
+				if (!jobs.has(job.id)) continue;
+				jobs.delete(job.id);
+				job.handler();
+			}
+		},
+	};
+}
+
+function completionResult(overrides: Record<string, unknown> = {}) {
+	return {
+		id: `notify-${Math.random().toString(36).slice(2)}`,
+		agent: "worker",
+		success: true,
+		summary: "Done",
+		exitCode: 0,
+		timestamp: 123,
+		sessionId: "session-a",
+		...overrides,
+	};
+}
+
+describe("registerSubagentNotify", () => {
+	it("uses a fallback summary when a background completion is empty", () => {
+		const { events, sent } = createPi();
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-empty-1",
+			agent: "worker",
+			success: true,
+			summary: "",
+			exitCode: 0,
+			timestamp: 123,
+			sessionId: "session-1",
+		});
+
+		assert.equal(sent.length, 1);
+		assert.deepEqual(sent[0], {
+			message: {
+				customType: "subagent-notify",
+				content: "Background task completed: **worker**\n\n(no output)",
+				display: true,
+			},
+			options: { triggerTurn: true },
+		});
+	});
+
+	it("acknowledges direct delivery only after sendMessage accepts it", async () => {
+		const { notifier, sent } = createPi("session-a");
+		assert.equal(await notifier.deliver(completionResult({ id: "direct-accepted" })), true);
+		assert.equal(sent.length, 1);
+	});
+
+	it("suppresses local delivery after an acknowledged grouped intercom relay", async () => {
+		const { notifier, sent } = createPi("session-a");
+		assert.equal(await notifier.deliver(completionResult({ id: "intercom-delivered", intercomDelivered: true })), true);
+		assert.equal(sent.length, 0);
+	});
+
+	it("rejects a pending batch when the notifier is disposed", async () => {
+		const clock = createFakeClock();
+		const { notifier, sent } = createBatchingPi(clock);
+		const pending = notifier.deliver(completionResult({ id: "dispose-pending" }));
+		notifier.dispose();
+		assert.equal(await pending, false);
+		clock.advance(1000);
+		assert.equal(sent.length, 0);
+	});
+
+	it("wakes the originating session with recovered detached foreground output", () => {
+		const { events, sent } = createPi();
+
+		events.emit(SUBAGENT_FOREGROUND_COMPLETE_EVENT, {
+			id: "foreground-run:0",
+			runId: "foreground-run",
+			source: "foreground",
+			agent: "reviewer",
+			success: true,
+			summary: "Recovered final review",
+			exitCode: 0,
+			timestamp: 123,
+			sessionId: "session-1",
+		});
+
+		assert.equal(sent.length, 1);
+		assert.deepEqual(sent[0], {
+			message: {
+				customType: "subagent-notify",
+				content: "Detached foreground task completed: **reviewer**\n\nRecovered final review",
+				display: true,
+			},
+			options: { triggerTurn: true },
+		});
+	});
+
+	it("does not deliver detached foreground completion to another active session", () => {
+		const { events, sent } = createPi("session-2");
+		events.emit(SUBAGENT_FOREGROUND_COMPLETE_EVENT, {
+			id: "foreground-run:0",
+			source: "foreground",
+			agent: "reviewer",
+			success: true,
+			summary: "Recovered final review",
+			timestamp: 123,
+			sessionId: "session-1",
+		});
+		assert.equal(sent.length, 0);
+	});
+
+	it("preserves non-empty completion summaries", () => {
+		const { events, sent } = createPi();
+		const summary = "  Done streaming\nAll clear  ";
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-summary-1",
+			agent: "worker",
+			success: true,
+			summary,
+			exitCode: 0,
+			timestamp: 456,
+			taskIndex: 1,
+			totalTasks: 3,
+			sessionId: "session-1",
+		});
+
+		assert.equal(sent.length, 1);
+		assert.deepEqual(sent[0], {
+			message: {
+				customType: "subagent-notify",
+				content: `Background task completed: **worker** (2/3)\n\n${summary}`,
+				display: true,
+			},
+			options: { triggerTurn: true },
+		});
+	});
+
+	it("preserves session paths in notification content", () => {
+		const { events, sent } = createPi();
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-path-1",
+			agent: "worker",
+			success: true,
+			summary: "Done",
+			exitCode: 0,
+			timestamp: 456,
+			sessionFile: "/tmp/session.jsonl",
+			sessionId: "session-1",
+		});
+
+		assert.deepEqual(sent, [{
+			message: {
+				customType: "subagent-notify",
+				content: "Background task completed: **worker**\n\nDone\n\nSession file: /tmp/session.jsonl",
+				display: true,
+			},
+			options: { triggerTurn: true },
+		}]);
+	});
+
+	it("labels paused completions as paused even without an exit code", () => {
+		const { events, sent } = createPi();
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-paused-1",
+			agent: "worker",
+			success: false,
+			state: "paused",
+			summary: "Paused after interrupt. Waiting for explicit next action.",
+			timestamp: 789,
+			sessionId: "session-1",
+		});
+
+		assert.equal(sent.length, 1);
+		assert.deepEqual(sent[0], {
+			message: {
+				customType: "subagent-notify",
+				content: "Background task paused: **worker**\n\nPaused after interrupt. Waiting for explicit next action.",
+				display: true,
+			},
+			options: { triggerTurn: true },
+		});
+	});
+
+	it("ignores completions for other or missing session ids", () => {
+		const { events, sent } = createPi("session-owner");
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-other-session",
+			agent: "worker",
+			success: true,
+			summary: "Other done",
+			timestamp: 100,
+			sessionId: "session-other",
+		});
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-sessionless",
+			agent: "worker",
+			success: true,
+			summary: "Legacy cwd-scoped done",
+			timestamp: 101,
+			cwd: "/repo",
+		});
+
+		assert.deepEqual(sent, []);
+	});
+
+	it("emits failed completions immediately even while successes are held", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "ok-1", agent: "ok-1", summary: "ok-1 done" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "fail-1", agent: "fail-1", success: false, summary: "boom", exitCode: 1 }));
+
+		// The failure must arrive immediately, and the held success must be
+		// flushed ahead of it rather than waiting on the debounce timer.
+		assert.equal(sent.length, 2);
+		assert.match((sent[0]!.message as { content: string }).content, /Background task completed: \*\*ok-1\*\*/);
+		assert.match((sent[1]!.message as { content: string }).content, /Background task failed: \*\*fail-1\*\*/);
+
+		// No deferred emission should arrive later.
+		clock.advance(1000);
+		assert.equal(sent.length, 2);
+	});
+
+	it("groups sibling successes into a single notification after the debounce window", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-2", agent: "beta", summary: "beta done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-3", agent: "gamma", summary: "gamma done", sessionId: "session-a" }));
+		assert.equal(sent.length, 0);
+
+		clock.advance(150);
+		assert.equal(sent.length, 1);
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.match(content, /^Background tasks completed \(3\): \*\*alpha\*\*, \*\*beta\*\*, \*\*gamma\*\*/);
+		assert.match(content, /1\. alpha\nalpha done/);
+		assert.match(content, /3\. gamma\ngamma done/);
+		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
+	});
+
+	it("ignores successes from other sessions instead of grouping them", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock, "session-a");
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "s-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "s-2", agent: "beta", summary: "beta done", sessionId: "session-b" }));
+		clock.advance(150);
+
+		assert.equal(sent.length, 1);
+		assert.match((sent[0]!.message as { content: string }).content, /^Background task completed: \*\*alpha\*\*/);
+		assert.doesNotMatch((sent[0]!.message as { content: string }).content, /beta done/);
+	});
+
+	it("does not let another session failure flush held successes", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock, "session-a");
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "held-a-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "fail-b-1", agent: "beta", success: false, summary: "boom", exitCode: 1, sessionId: "session-b" }));
+		assert.equal(sent.length, 0);
+
+		clock.advance(150);
+		assert.equal(sent.length, 1);
+		assert.match((sent[0]!.message as { content: string }).content, /^Background task completed: \*\*alpha\*\*/);
+		assert.doesNotMatch((sent[0]!.message as { content: string }).content, /boom/);
+	});
+
+	it("disposes queued completions without emitting and is idempotent", () => {
+		const clock = createFakeClock();
+		const { events, sent, dispose } = createBatchingPi(clock);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "dispose-held-1" }));
+		assert.equal(sent.length, 0);
+		assert.equal(events.listenerCount(SUBAGENT_ASYNC_COMPLETE_EVENT), 1);
+		assert.equal(events.listenerCount(SUBAGENT_FOREGROUND_COMPLETE_EVENT), 1);
+
+		dispose();
+		dispose();
+		assert.equal(events.listenerCount(SUBAGENT_ASYNC_COMPLETE_EVENT), 0);
+		assert.equal(events.listenerCount(SUBAGENT_FOREGROUND_COMPLETE_EVENT), 0);
+
+		clock.advance(1000);
+		assert.equal(sent.length, 0);
+	});
+
+	it("does not let a disposed notifier affect another runtime", () => {
+		const oldClock = createFakeClock();
+		const oldRegistration = createBatchingPi(oldClock);
+		oldRegistration.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "old-owner-held-1" }));
+
+		const newClock = createFakeClock();
+		const newRegistration = createBatchingPi(newClock);
+		oldRegistration.dispose();
+		oldClock.advance(1000);
+		assert.equal(oldRegistration.sent.length, 0);
+
+		newRegistration.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "new-owner-1" }));
+		newClock.advance(150);
+		assert.equal(newRegistration.sent.length, 1);
+		newRegistration.dispose();
+	});
+});
+
+describe("completion formatting helpers", () => {
+	it("formats and parses a parallel handoff without folding it into the result preview", () => {
+		const content = formatSingleCompletion({
+			agent: "worker",
+			status: "completed",
+			resultPreview: "Done",
+			handoffPath: "/tmp/run/handoff.json",
+			sessionLabel: "Session file",
+			sessionValue: "/tmp/session.jsonl",
+		});
+		assert.equal(content, "Background task completed: **worker**\n\nDone\n\nParallel handoff: /tmp/run/handoff.json\n\nSession file: /tmp/session.jsonl");
+		assert.deepEqual(parseSubagentNotifyContent(content), {
+			agent: "worker",
+			status: "completed",
+			resultPreview: "Done",
+			handoffPath: "/tmp/run/handoff.json",
+			sessionLabel: "session file",
+			sessionValue: "/tmp/session.jsonl",
+		});
+		assert.equal(buildCompletionDetails({
+			id: "run",
+			agent: "worker",
+			success: true,
+			summary: "Done",
+			parallelHandoff: { path: "/tmp/run/handoff.json" },
+		}).handoffPath, "/tmp/run/handoff.json");
+	});
+
+	it("formatSingleCompletion mirrors the in-handler single message shape", () => {
+		const content = formatSingleCompletion({
+			agent: "worker",
+			status: "completed",
+			taskInfo: " (2/3)",
+			resultPreview: "Done",
+			sessionLabel: "Session file",
+			sessionValue: "/tmp/session.jsonl",
+		});
+		assert.equal(content, "Background task completed: **worker** (2/3)\n\nDone\n\nSession file: /tmp/session.jsonl");
+	});
+
+	it("parses detached foreground notification content for the custom renderer", () => {
+		const content = formatSingleCompletion({
+			agent: "reviewer",
+			status: "failed",
+			source: "foreground",
+			resultPreview: "Acceptance rejected",
+			sessionLabel: "Session file",
+			sessionValue: "/tmp/reviewer.jsonl",
+		});
+		assert.deepEqual(parseSubagentNotifyContent(content), {
+			agent: "reviewer",
+			status: "failed",
+			source: "foreground",
+			resultPreview: "Acceptance rejected",
+			sessionLabel: "session file",
+			sessionValue: "/tmp/reviewer.jsonl",
+		});
+	});
+
+	it("formatGroupedCompletion lists each agent with its summary and session", () => {
+		const content = formatGroupedCompletion([
+			{ agent: "alpha", status: "completed", resultPreview: "alpha done" },
+			{ agent: "beta", status: "completed", taskInfo: " (1/2)", resultPreview: "", sessionLabel: "Session", sessionValue: "https://share/abc" },
+		]);
+		assert.equal(
+			content,
+			"Background tasks completed (2): **alpha**, **beta** (1/2)\n\n"
+			+ "1. alpha\nalpha done\n\n"
+			+ "2. beta (1/2)\n(no output)\nSession: https://share/abc",
+		);
+	});
+
+	it("reports false when Pi rejects sendMessage synchronously", async () => {
+		const pi = { events: createEventBus(), sendMessage() { throw new Error("runtime inactive"); } };
+		const notifier = registerSubagentNotify(pi as never, { currentSessionId: "session-a" }, { batchConfig: { enabled: false } });
+		assert.equal(await notifier.deliver(completionResult({ id: "direct-rejected" })), false);
+		notifier.dispose();
+	});
+
+	it("buildCompletionDetails derives paused and stopped statuses", () => {
+		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: false, state: "paused", summary: "Paused after interrupt.", timestamp: 1 }).status, "paused");
+		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: false, summary: "boom", exitCode: 1, timestamp: 1 }).status, "failed");
+		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: false, summary: "terminated", exitCode: 1, processSignal: "SIGTERM", timestamp: 1 }).status, "stopped");
+		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: false, summary: "terminated", results: [{ success: false, exitCode: 1, processSignal: "SIGTERM" }], timestamp: 1 }).status, "stopped");
+		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: true, summary: "ok", exitCode: 0, processSignal: "SIGTERM", timestamp: 1 }).status, "completed");
+	});
+
+	it("buildCompletionDetails falls back to the unknown agent label", () => {
+		const details: SubagentNotifyDetails = buildCompletionDetails({ id: "x", agent: null, success: true, summary: "ok", timestamp: 1 });
+		assert.equal(details.agent, "unknown");
+		assert.equal(details.status, "completed");
+	});
+});

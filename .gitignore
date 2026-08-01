@@ -1,0 +1,8 @@
+﻿.pi/todos/
+.weasley-subagents/
+.DS_Store
+AGENTS.md
+node_modules/
+.fallow/
+tmp/
+
