@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-08-02
+
+### Added
+- Relaunched the project as Weasley Subagents with original Weasley artwork, open-source governance, and an Apache-2.0 distribution.
+- Added a version-pinned package installer/remover, explicit opt-in session viewer templates, and tests for both surfaces.
+
+### Changed
+- Moved extension configuration to `~/.pi/agent/extensions/weasley-subagents/config.json` while retaining a read-only migration fallback for the previous path.
+- Bounded Node test concurrency and made subprocess fixtures terminate deterministically so local and CI verification no longer saturate a workstation or wait on background handles.
+
+### Fixed
+- Kept the user home directory from being mistaken for a project root on Windows.
+- Quoted Node executable paths in acceptance checks so installations under paths containing spaces work correctly.
+
 ### Added
 - Added watchdog current-scope context, optional every-N-tools scope-monitor cadence, and visible main-session blocker auto-follow, inspired by Scopey (github.com/ArchAstro/scopey) by Calvin Grunewald (@CalvinGrunewald).
 - Added optional `runtimeAcknowledgedExtensions` status/result/RPC metadata for cooperating child-runtime extensions that emit `subagent:acknowledge-extension`. Thanks to @saleemlala for #705.
@@ -239,7 +253,7 @@
 - Added uniform per-child transcript artifacts (`<run>_<agent>_transcript.jsonl`) for foreground and async subagent runs, gated by `subagents.artifacts.includeTranscript` (default on). Each transcript is a versioned JSONL stream of child messages, tool starts/ends, and stdout/stderr lines with a byte cap and truncation marker.
 - Added `subagent({ action: "steer", id, message, index? })` for non-terminal guidance to live async Pi child sessions, with file-backed control requests, per-child steering inboxes, status/event visibility, and queued delivery for pending indexed async children when the runtime supports mid-run steering.
 - Added an optional `turnBudget` (`maxTurns` with `graceTurns`) for foreground and async/background subagent runs. At the soft `maxTurns` limit the child is warned via its system prompt to wrap up; after `graceTurns` additional assistant turns the run is aborted and partial output is returned. `turnBudget`, `turnBudgetExceeded`, and `wrapUpRequested` propagate through results, async status, and nested summaries.
-- Added optional scheduled subagent runs so callers can defer a subagent launch until a future time. `subagent({ action: "schedule", agent, task?, schedule: "+10m" | "2030-01-01T09:00:00Z", scheduleName? })` arms a one-shot timer that launches the run as a normal tracked async run once it fires, with `schedule-list`, `schedule-status`, and `schedule-cancel` management actions. Schedules are persisted per session and restored after a Pi restart; jobs missed by more than the configured lateness window are marked `missed` instead of firing late. The feature is opt-in and requires `{ "scheduledRuns": { "enabled": true } }` in `~/.pi/agent/extensions/subagent/config.json`. Only schedule explicit delayed runs the user asked for. Thanks to @tintinweb for the concept.
+- Added optional scheduled subagent runs so callers can defer a subagent launch until a future time. `subagent({ action: "schedule", agent, task?, schedule: "+10m" | "2030-01-01T09:00:00Z", scheduleName? })` arms a one-shot timer that launches the run as a normal tracked async run once it fires, with `schedule-list`, `schedule-status`, and `schedule-cancel` management actions. Schedules are persisted per session and restored after a Pi restart; jobs missed by more than the configured lateness window are marked `missed` instead of firing late. The feature is opt-in and requires `{ "scheduledRuns": { "enabled": true } }` in `~/.pi/agent/extensions/weasley-subagents/config.json`. Only schedule explicit delayed runs the user asked for. Thanks to @tintinweb for the concept.
 - Added a real Pi-session E2E test lane with faux provider routing to verify parent-child subagent result delivery without network model calls.
 - Hardened the `wait` tool's wake path so an event wake cancels its poll-interval fallback timer instead of letting both run, and so an already-aborted turn resolves immediately. Added a test that verifies an event wakes `wait` before the poll interval elapses.
 - Added smart completion batching for async subagent notifications. Successful sibling completions that finish within a short window now arrive as a single grouped message instead of separate notifications; a hard max-wait cap prevents holding them indefinitely, and late-finishing siblings join a shorter straggler group. Failed and paused completions bypass batching and fire immediately so failure and attention signals are never delayed. The debounce window, max-wait cap, and straggler windows are configurable via `completionBatch` in `config.json`.
@@ -732,7 +746,7 @@
 - Top-level parallel `tasks` mode now supports a per-call `concurrency` override, matching the existing chain parallel-step concurrency control. This ships part of issue `#91`. Thanks @Gabrielgvl.
 
 ### Changed
-- Top-level parallel defaults and limits can now be configured through `~/.pi/agent/extensions/subagent/config.json` under `parallel.maxTasks` and `parallel.concurrency`, while keeping the existing defaults of 8 tasks and concurrency 4 when unset. This completes issue `#91`. Thanks @Gabrielgvl.
+- Top-level parallel defaults and limits can now be configured through `~/.pi/agent/extensions/weasley-subagents/config.json` under `parallel.maxTasks` and `parallel.concurrency`, while keeping the existing defaults of 8 tasks and concurrency 4 when unset. This completes issue `#91`. Thanks @Gabrielgvl.
 
 ### Fixed
 - `context: "fork"` sync runs now create child sessions from a throwaway session-manager instance opened on the persisted parent session file, instead of mutating the live parent session manager. This keeps the parent session writing to its own file so the matching `toolResult(subagent)` no longer lands in a descendant session by accident. This fixes issue `#87`. Thanks @asmisha.
@@ -1031,7 +1045,7 @@
 - Agent Manager TUI guards: delete and edit actions on builtin agents are blocked with an error status. Detail screen hides `[e]dit` from the footer for builtins. Scope badge shows `[builtin]` instead of falling through to `[proj]`.
 - Cloning a builtin agent set the scope to `"builtin"` at runtime (violating the `"user" | "project"` type), causing wrong badge display and the clone inheriting builtin protections until session reload. Now maps to `"user"`.
 - Agent Manager `loadEntries` suppresses builtins overridden by user/project agents, preventing duplicate entries in the TUI list.
-- `BUILTIN_AGENTS_DIR` resolved via `import.meta.url` instead of hardcoded `~/.pi/agent/extensions/subagent/agents` path. Works regardless of where the extension is installed.
+- `BUILTIN_AGENTS_DIR` resolved via `import.meta.url` instead of a hardcoded extension path. Works regardless of where the extension is installed.
 - `handleCreate` now warns when creating an agent that shadows a builtin (informational, not an error).
 
 ### Changed

@@ -1,94 +1,62 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 
-/**
- * weasley-subagents installer
- * 
- * Usage:
- *   npx weasley-subagents          # Install to ~/.pi/agent/extensions/subagent
- *   npx weasley-subagents --remove # Remove the extension
- */
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-import { execSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
+const metadata = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8").replace(/^\uFEFF/, ""));
+export const PACKAGE_NAME = metadata.name;
+export const PACKAGE_VERSION = metadata.version;
 
-const EXTENSION_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "subagent");
-const REPO_URL = "https://github.com/potatohoney-p/weasley-subagents.git";
+export function parseArguments(argv) {
+	const known = new Set(["--help", "-h", "--version", "-v", "--remove", "-r", "--project", "-l"]);
+	const unknown = argv.filter((arg) => !known.has(arg));
+	if (unknown.length > 0) throw new Error(`Unknown option: ${unknown[0]}`);
+	return {
+		help: argv.some((arg) => arg === "--help" || arg === "-h"),
+		version: argv.some((arg) => arg === "--version" || arg === "-v"),
+		remove: argv.some((arg) => arg === "--remove" || arg === "-r"),
+		project: argv.some((arg) => arg === "--project" || arg === "-l"),
+	};
+}
 
-const args = process.argv.slice(2);
-const isRemove = args.includes("--remove") || args.includes("-r");
-const isHelp = args.includes("--help") || args.includes("-h");
+export function buildPiArguments(options) {
+	const source = options.remove ? `npm:${PACKAGE_NAME}` : `npm:${PACKAGE_NAME}@${PACKAGE_VERSION}`;
+	return [options.remove ? "remove" : "install", source, ...(options.project ? ["-l"] : [])];
+}
 
-if (isHelp) {
-	console.log(`
-weasley-subagents - Pi extension for delegating tasks to subagents
+export function runCli({ argv = process.argv.slice(2), spawn = spawnSync, platform = process.platform } = {}) {
+	let options;
+	try {
+		options = parseArguments(argv);
+	} catch (error) {
+		console.error(error instanceof Error ? error.message : String(error));
+		return 2;
+	}
+	if (options.help) {
+		console.log(`Weasley Subagents ${PACKAGE_VERSION}
 
 Usage:
-  npx weasley-subagents          Install the extension
-  npx weasley-subagents --remove Remove the extension
-  npx weasley-subagents --help   Show this help
+  npx ${PACKAGE_NAME}              Install this exact released version
+  npx ${PACKAGE_NAME} --remove     Remove the managed npm package
+  npx ${PACKAGE_NAME} --project    Manage the current project's Pi settings
 
-Installation directory: ${EXTENSION_DIR}
-`);
-	process.exit(0);
-}
-
-if (isRemove) {
-	if (fs.existsSync(EXTENSION_DIR)) {
-		console.log(`Removing ${EXTENSION_DIR}...`);
-		fs.rmSync(EXTENSION_DIR, { recursive: true });
-		console.log("weasley-subagents removed");
-	} else {
-		console.log("weasley-subagents is not installed");
+Removal is delegated to Pi's package manager. User configuration and run
+artifacts are intentionally left untouched.`);
+		return 0;
 	}
-	process.exit(0);
-}
-
-// Install
-console.log("Installing weasley-subagents...\n");
-
-// Ensure parent directory exists
-const parentDir = path.dirname(EXTENSION_DIR);
-if (!fs.existsSync(parentDir)) {
-	fs.mkdirSync(parentDir, { recursive: true });
-}
-
-// Check if already installed
-if (fs.existsSync(EXTENSION_DIR)) {
-	const isGitRepo = fs.existsSync(path.join(EXTENSION_DIR, ".git"));
-	if (isGitRepo) {
-		console.log("Updating existing installation...");
-		try {
-			execSync("git pull", { cwd: EXTENSION_DIR, stdio: "inherit" });
-			console.log("\nweasley-subagents updated");
-		} catch (err) {
-			console.error("Failed to update. Try removing and reinstalling:");
-			console.error("  npx weasley-subagents --remove && npx weasley-subagents");
-			process.exit(1);
-		}
-	} else {
-		console.log(`Directory exists but is not a git repo: ${EXTENSION_DIR}`);
-		console.log("Remove it first with: npx weasley-subagents --remove");
-		process.exit(1);
+	if (options.version) {
+		console.log(PACKAGE_VERSION);
+		return 0;
 	}
-} else {
-	// Fresh install
-	console.log(`Cloning to ${EXTENSION_DIR}...`);
-	try {
-		execSync(`git clone ${REPO_URL} "${EXTENSION_DIR}"`, { stdio: "inherit" });
-		console.log("\nweasley-subagents installed");
-	} catch (err) {
-		console.error("Failed to clone repository");
-		process.exit(1);
+	const command = platform === "win32" ? "pi.cmd" : "pi";
+	const result = spawn(command, buildPiArguments(options), { stdio: "inherit", shell: false });
+	if (result.error) {
+		console.error(`Could not run Pi (${result.error.message}). Install @earendil-works/pi-coding-agent first.`);
+		return 1;
 	}
+	return result.status ?? 1;
 }
 
-console.log(`
-The extension is now available in pi. Tools added:
-  • subagent - Delegate tasks to agents and inspect run status
-  • subagent_wait - Block until background subagent runs finish (delivers their results)
-
-Documentation: ${EXTENSION_DIR}/README.md
-`);
-
+const invokedPath = process.argv[1] ? fileURLToPath(new URL(`file:///${process.argv[1].replaceAll("\\", "/")}`)) : undefined;
+if (invokedPath === fileURLToPath(import.meta.url)) process.exitCode = runCli();

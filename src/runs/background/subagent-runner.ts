@@ -121,6 +121,7 @@ import { formatParallelHandoffError, formatParallelHandoffReference, parallelHan
 import { resolveWatchdogConfig } from "../../watchdog/settings.ts";
 import { createBoundedByteTail, createBoundedLineReader, formatProtocolOutputLimit, MAX_CHILD_STDERR_BYTES, projectChildLifecycle, type ChildLifecycleAction, type ProtocolOutputLimit } from "../shared/child-protocol.ts";
 import { acquireSessionLease, type SessionLeaseRequest } from "../shared/session-lease.ts";
+import { buildShareViewerUrl } from "./share-link.ts";
 import { decodeSubagentCapabilityCeiling, SUBAGENT_CAPABILITY_CEILING_ENV, type ResolvedSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
 import {
 	CHILD_WATCHDOG_CONFIG_ENV,
@@ -896,6 +897,11 @@ async function exportSessionHtml(sessionFile: string, outputDir: string, piPacka
 }
 
 function createShareLink(htmlPath: string): { shareUrl: string; gistUrl: string } | { error: string } {
+	const configuredViewer = process.env.WEASLEY_SUBAGENTS_SHARE_VIEWER_URL?.trim();
+	if (configuredViewer) {
+		const validation = buildShareViewerUrl("https://gist.github.com/preview", "preview", configuredViewer);
+		if ("error" in validation) return validation;
+	}
 	try {
 		const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf-8" });
 		if (auth.status !== 0) {
@@ -914,8 +920,9 @@ function createShareLink(htmlPath: string): { shareUrl: string; gistUrl: string 
 		const gistUrl = (result.stdout || "").trim();
 		const gistId = gistUrl.split("/").pop();
 		if (!gistId) return { error: "Failed to parse gist ID." };
-		const shareUrl = `https://shittycodingagent.ai/session/?${gistId}`;
-		return { shareUrl, gistUrl };
+		const viewer = buildShareViewerUrl(gistUrl, gistId, configuredViewer);
+		if ("error" in viewer) return viewer;
+		return { shareUrl: viewer.shareUrl, gistUrl };
 	} catch (err) {
 		return { error: String(err) };
 	}

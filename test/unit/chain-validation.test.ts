@@ -254,6 +254,7 @@ describe("chain input validation", { skip: !schemasAvailable ? "typebox not avai
 describe("registered subagent tool prepareArguments", { skip: !schemasAvailable ? "typebox not available" : undefined }, () => {
 	function runPrepare(args: unknown): { error?: string; ok: true } | { error: string; ok: false } {
 		const script = String.raw`
+			import { writeSync } from "node:fs";
 			import registerSubagentExtension from "./src/extension/index.ts";
 			const events = { on() { return () => {}; }, emit() {} };
 			let registeredTool;
@@ -275,12 +276,15 @@ describe("registered subagent tool prepareArguments", { skip: !schemasAvailable 
 			if (!registeredTool) throw new Error("tool not registered");
 			if (typeof registeredTool.prepareArguments !== "function") throw new Error("prepareArguments not attached");
 			const args = JSON.parse(process.argv[process.argv.length - 1] ?? "{}");
+			let result;
 			try {
 				registeredTool.prepareArguments(args);
-				process.stdout.write(JSON.stringify({ ok: true }));
+				result = { ok: true };
 			} catch (error) {
-				process.stdout.write(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+				result = { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}
+			writeSync(1, JSON.stringify(result));
+			process.exit(0);
 		`;
 		const output = execFileSync(
 			process.execPath,

@@ -6,6 +6,10 @@ import { getAgentDir } from "../shared/utils.ts";
 const ARTIFACT_DIR_PREFERENCES = new Set<ArtifactDirPreference>(["project", "session", "temp"]);
 
 export function getConfigPath(): string {
+	return path.join(getAgentDir(), "extensions", "weasley-subagents", "config.json");
+}
+
+export function getLegacyConfigPath(): string {
 	return path.join(getAgentDir(), "extensions", "subagent", "config.json");
 }
 
@@ -29,13 +33,15 @@ export function saveConfig(config: ExtensionConfig, configPath = getConfigPath()
 
 export function updateConfig(updater: (config: ExtensionConfig) => ExtensionConfig): ExtensionConfig {
 	const configPath = getConfigPath();
-	const next = updater(readConfigForUpdate(configPath));
+	const readPath = fs.existsSync(configPath) ? configPath : getLegacyConfigPath();
+	const next = updater(readConfigForUpdate(readPath));
 	saveConfig(next, configPath);
 	return next;
 }
 
 export function loadConfig(): ExtensionConfig {
-	const configPath = getConfigPath();
+	const preferredPath = getConfigPath();
+	const configPath = fs.existsSync(preferredPath) ? preferredPath : getLegacyConfigPath();
 	try {
 		return readConfigForUpdate(configPath);
 	} catch (error) {

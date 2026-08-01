@@ -203,7 +203,7 @@ describe("acceptance gates", () => {
 		const verified = resolveEffectiveAcceptance({
 			agentName: "worker",
 			task: "Implement the fix",
-			explicit: { level: "verified", verify: [{ id: "ok", command: `${process.execPath} -e "process.exit(0)"` }] },
+			explicit: { level: "verified", verify: [{ id: "ok", command: `${JSON.stringify(process.execPath)} -e "process.exit(0)"` }] },
 			agentContract: { version: 1 },
 		});
 		assert.equal(formatAcceptancePrompt(verified, { reportOptional: true }), "");

@@ -14,14 +14,17 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.2.0
         with:
           node-version: 24
+          package-manager-cache: false
       - name: Install devDependencies
         run: npm ci --ignore-scripts
       - name: Unit tests
         run: npm test
+      - name: Typecheck
+        run: npm run typecheck
       - name: Integration tests
         run: npm run test:integration
       - name: E2E tests
