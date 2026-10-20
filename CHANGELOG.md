@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Escalate foreground cancellation to SIGKILL when a child ignores SIGTERM, and clear the escalation timer when its lifecycle finishes.
+
 ## [0.39.0] - 2026-08-02
 
 ### Added
