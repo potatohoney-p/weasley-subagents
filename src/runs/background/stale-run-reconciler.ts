@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { writeAtomicJson } from "../../shared/atomic-json.ts";
+import { writeAtomicJson, writeAtomicJsonIfAbsent } from "../../shared/atomic-json.ts";
 import { RESULTS_DIR, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode } from "../../shared/types.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
@@ -107,6 +107,9 @@ function readStatusFile(asyncDir: string): AsyncStatus | null {
 interface ResultChildOutcome {
 	agent?: string;
 	success?: boolean;
+	stopped?: boolean;
+	interrupted?: boolean;
+	timedOut?: boolean;
 	error?: string;
 	sessionFile?: string;
 	model?: string;
@@ -116,14 +119,16 @@ interface ResultChildOutcome {
 }
 
 interface ResultRepairData {
-	state: "complete" | "failed" | "paused" | "stopped";
+	state: "complete" | "failed" | "paused" | "stopped" | "rejected";
 	results?: ResultChildOutcome[];
 }
 
 function readResultRepairData(resultPath: string): ResultRepairData | undefined {
 	try {
 		const data = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as { success?: boolean; state?: string; exitCode?: number; results?: unknown };
-		const state = data.success ? "complete" : data.state === "stopped" ? "stopped" : data.state === "paused" || data.exitCode === 0 ? "paused" : "failed";
+		const state = data.state === "complete" || data.state === "failed" || data.state === "paused" || data.state === "stopped" || data.state === "rejected"
+			? data.state
+			: data.success ? "complete" : data.exitCode === 0 ? "paused" : "failed";
 		const results = Array.isArray(data.results)
 			? data.results.map((entry, index) => {
 				if (!entry || typeof entry !== "object" || Array.isArray(entry)) return {};
@@ -142,7 +147,10 @@ function readResultRepairData(resultPath: string): ResultRepairData | undefined 
 	}
 }
 
-function childState(overallState: ResultRepairData["state"], child: ResultChildOutcome | undefined): "complete" | "failed" | "paused" | "stopped" {
+function childState(overallState: ResultRepairData["state"], child: ResultChildOutcome | undefined): ResultRepairData["state"] {
+	if (child?.stopped === true) return "stopped";
+	if (child?.timedOut === true) return "failed";
+	if (child?.interrupted === true) return "paused";
 	if (child?.success === true) return "complete";
 	if (child?.success === false) return "failed";
 	return overallState;
@@ -160,11 +168,13 @@ function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: 
 		return {
 			...step,
 			status: state === "complete" ? "complete" as const : state,
+			activityState: undefined,
 			endedAt: step.endedAt ?? now,
 			durationMs: step.startedAt !== undefined && step.durationMs === undefined ? Math.max(0, now - step.startedAt) : step.durationMs,
 			exitCode: step.exitCode ?? (state === "complete" || state === "paused" ? 0 : 1),
 			error: state === "failed" || state === "stopped" ? step.error ?? child?.error : step.error,
 			stopped: state === "stopped" ? true : step.stopped,
+			timedOut: child?.timedOut ?? step.timedOut,
 			sessionFile: step.sessionFile ?? child?.sessionFile,
 			model,
 			thinking,
@@ -275,7 +285,12 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 
 function writeFailedRepair(asyncDir: string, status: AsyncStatus, resultPath: string, now: number, reason?: string): ReconcileAsyncRunResult {
 	const repair = buildFailedRepair(status, asyncDir, now, reason);
-	writeAtomicJson(resultPath, repair.result);
+	if (!writeAtomicJsonIfAbsent(resultPath, repair.result)) {
+		const terminalStatus = terminalStatusFromResult(status, resultPath, now);
+		if (!terminalStatus) return { status, repaired: false, resultPath };
+		writeAtomicJson(path.join(asyncDir, "status.json"), terminalStatus);
+		return { status: terminalStatus, repaired: true, resultPath, message: "Existing async result file was used to repair stale running status." };
+	}
 	writeAtomicJson(path.join(asyncDir, "status.json"), repair.status);
 	appendJsonlBestEffort(path.join(asyncDir, "events.jsonl"), {
 		type: "subagent.run.repaired_stale",
@@ -289,7 +304,7 @@ function writeFailedRepair(asyncDir: string, status: AsyncStatus, resultPath: st
 }
 
 function terminal(state: AsyncStatus["state"]): boolean {
-	return state === "complete" || state === "failed" || state === "paused" || state === "stopped";
+	return state === "complete" || state === "failed" || state === "paused" || state === "stopped" || state === "rejected";
 }
 
 function* nestedRuns(children: NestedRunSummary[] | undefined): Generator<NestedRunSummary> {

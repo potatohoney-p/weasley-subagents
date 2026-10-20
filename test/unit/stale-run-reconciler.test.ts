@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { checkPidLiveness, reconcileAsyncRun } from "../../src/runs/background/stale-run-reconciler.ts";
+import { checkPidLiveness, reconcileAsyncRun, reconcileNestedAsyncDescendants } from "../../src/runs/background/stale-run-reconciler.ts";
+import { createNestedRoute, projectNestedEvents, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
+import { TEMP_ROOT_DIR } from "../../src/shared/types.ts";
 
 function tempRoot(prefix: string): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -21,6 +24,107 @@ function errno(code: string): NodeJS.ErrnoException {
 }
 
 describe("async stale-run reconciliation", () => {
+	it("updates a nested child after its checkpoint is rejected while the parent is offline", () => {
+		const rootRunId = `rejected-${randomUUID()}`;
+		const route = createNestedRoute(rootRunId);
+		const asyncRoot = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", rootRunId);
+		const asyncDir = path.join(asyncRoot, "child");
+		const resultsDir = tempRoot("pi-nested-rejected-");
+		try {
+			writeNestedEvent(route, {
+				type: "subagent.nested.started", ts: 1000, parentRunId: rootRunId,
+				child: { id: "child", parentRunId: rootRunId, depth: 1, mode: "single", state: "running", startedAt: 1000, lastUpdate: 1000, asyncDir },
+			});
+			writeStatus(asyncDir, {
+				runId: "child", mode: "single", state: "rejected", startedAt: 1000, lastUpdate: 2000,
+				steps: [{ agent: "worker", status: "rejected" }],
+			});
+			reconcileNestedAsyncDescendants(route, { resultsDir, now: () => 3000 });
+			const rejected = projectNestedEvents(route).children[0];
+			assert.equal(rejected?.state, "rejected");
+			assert.equal(rejected?.steps?.[0]?.status, "rejected");
+			writeNestedEvent(route, {
+				type: "subagent.nested.updated", ts: 4000, parentRunId: rootRunId,
+				child: { id: "child", parentRunId: rootRunId, depth: 1, mode: "single", state: "running", lastUpdate: 4000 },
+			});
+			assert.equal(projectNestedEvents(route).children[0]?.state, "rejected");
+		} finally {
+			fs.rmSync(path.dirname(route.eventSink), { recursive: true, force: true });
+			fs.rmSync(asyncRoot, { recursive: true, force: true });
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
+	for (const outcome of [
+		{ state: "stopped", child: { success: false, stopped: true }, childState: "stopped", exitCode: 1 },
+		{ state: "paused", child: { success: false, interrupted: true }, childState: "paused", exitCode: 0 },
+		{ state: "failed", child: { success: false, timedOut: true }, childState: "failed", exitCode: 1 },
+		{ state: "rejected", child: undefined, childState: "rejected", exitCode: 1 },
+	] as const) {
+		it(`preserves ${outcome.state} lifecycle details when restoring stale status`, () => {
+			const root = tempRoot("pi-stale-lifecycle-");
+			try {
+				const asyncDir = path.join(root, "run");
+				const resultsDir = path.join(root, "results");
+				fs.mkdirSync(resultsDir);
+				writeStatus(asyncDir, {
+					runId: "run", mode: "chain", state: "running", pid: 12345,
+					startedAt: 1000, lastUpdate: 1000,
+					steps: [
+						{ agent: "scout", status: "completed", exitCode: 0 },
+						{ agent: "worker", status: "running", startedAt: 1100, activityState: "needs_attention" },
+					],
+				});
+				fs.writeFileSync(path.join(resultsDir, "run.json"), JSON.stringify({
+					id: "run", success: false, state: outcome.state,
+					results: [{ agent: "scout", success: true }, ...(outcome.child ? [{ agent: "worker", ...outcome.child, error: "Stopped at checkpoint" }] : [])],
+				}));
+
+				const result = reconcileAsyncRun(asyncDir, { resultsDir, now: () => 2000 });
+				assert.equal(result.status?.state, outcome.state);
+				assert.equal(result.status?.steps?.[0]?.status, "completed");
+				const child = result.status?.steps?.[1];
+				assert.equal(child?.status, outcome.childState);
+				assert.equal(child?.exitCode, outcome.exitCode);
+				assert.equal(child?.activityState, undefined);
+				if (outcome.state === "stopped") assert.equal(child?.stopped, true);
+				if (outcome.state === "failed") assert.equal(child?.timedOut, true);
+				assert.equal(reconcileAsyncRun(asyncDir, { resultsDir }).repaired, false);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("preserves a real result published while checking a stale runner", () => {
+		const root = tempRoot("pi-stale-late-result-");
+		try {
+			const asyncDir = path.join(root, "run");
+			const resultsDir = path.join(root, "results");
+			fs.mkdirSync(resultsDir);
+			writeStatus(asyncDir, {
+				runId: "run", mode: "single", state: "running", pid: 12345,
+				startedAt: 1000, lastUpdate: 1000,
+				steps: [{ agent: "worker", status: "running" }],
+			});
+			const resultPath = path.join(resultsDir, "run.json");
+			const completed = JSON.stringify({ id: "run", success: true, state: "complete", summary: "durable answer" });
+			const result = reconcileAsyncRun(asyncDir, {
+				resultsDir, now: () => 2000,
+				kill: () => {
+					fs.writeFileSync(resultPath, completed);
+					throw errno("ESRCH");
+				},
+			});
+			assert.equal(fs.readFileSync(resultPath, "utf-8"), completed);
+			assert.equal(result.status?.state, "complete");
+			assert.equal(result.status?.steps?.[0]?.status, "complete");
+			assert.equal(fs.existsSync(path.join(asyncDir, "events.jsonl")), false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("classifies pid liveness without treating EPERM as dead", () => {
 		assert.equal(checkPidLiveness(123, () => true), "alive");
 		assert.equal(checkPidLiveness(123, () => { throw errno("ESRCH"); }), "dead");
