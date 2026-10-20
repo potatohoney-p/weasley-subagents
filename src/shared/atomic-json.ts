@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { DEFAULT_FILE_SYSTEM_RETRY_DELAYS_MS, runFileSystemOperationWithRetry, waitForFileSystemRetry } from "./file-system-retry.ts";
 
-type AtomicJsonFs = Pick<typeof fs, "mkdirSync" | "writeFileSync" | "renameSync" | "rmSync">;
+type AtomicJsonFs = Pick<typeof fs, "mkdirSync" | "writeFileSync" | "renameSync" | "rmSync"> & Partial<Pick<typeof fs, "linkSync">>;
 
 type AtomicJsonWriterOptions = {
 	fs?: AtomicJsonFs;
@@ -14,6 +14,8 @@ type AtomicJsonWriterOptions = {
 	retryDirectoryErrors?: boolean;
 	retryDelaysMs?: readonly number[];
 	wait?: (delayMs: number) => void;
+	/** Publish without replacing an existing file. Requires same-filesystem hard links. */
+	replaceExisting?: boolean;
 };
 
 function renameWithRetry(
@@ -28,7 +30,7 @@ function renameWithRetry(
 	}, { retryDelaysMs, wait });
 }
 
-export function createAtomicJsonWriter(options: AtomicJsonWriterOptions = {}): (filePath: string, payload: object) => void {
+export function createAtomicJsonWriter(options: AtomicJsonWriterOptions = {}): (filePath: string, payload: object) => boolean {
 	const fsImpl = options.fs ?? fs;
 	const now = options.now ?? Date.now;
 	const pid = options.pid ?? process.pid;
@@ -40,7 +42,7 @@ export function createAtomicJsonWriter(options: AtomicJsonWriterOptions = {}): (
 	const renameRetryDelaysMs = retryRenameErrors ? retryDelaysMs : [];
 	const directoryRetryDelaysMs = retryDirectoryErrors ? retryDelaysMs : [];
 	const wait = options.wait ?? waitForFileSystemRetry;
-	return (filePath: string, payload: object): void => {
+	return (filePath: string, payload: object): boolean => {
 		runFileSystemOperationWithRetry(() => {
 			fsImpl.mkdirSync(path.dirname(filePath), { recursive: true });
 		}, { retryDelaysMs: directoryRetryDelaysMs, wait });
@@ -50,7 +52,20 @@ export function createAtomicJsonWriter(options: AtomicJsonWriterOptions = {}): (
 		);
 		try {
 			fsImpl.writeFileSync(tempPath, JSON.stringify(payload, null, 2), mode === undefined ? "utf-8" : { encoding: "utf-8", mode });
-			renameWithRetry(fsImpl, tempPath, filePath, renameRetryDelaysMs, wait);
+			if (options.replaceExisting === false) {
+				// Linking publishes a complete file atomically and fails if another
+				// writer won. A check followed by rename would overwrite that winner.
+				if (!fsImpl.linkSync) throw new Error("Atomic JSON publication requires hard-link support.");
+				try {
+					runFileSystemOperationWithRetry(() => fsImpl.linkSync!(tempPath, filePath), { retryDelaysMs: renameRetryDelaysMs, wait });
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+					throw error;
+				}
+			} else {
+				renameWithRetry(fsImpl, tempPath, filePath, renameRetryDelaysMs, wait);
+			}
+			return true;
 		} finally {
 			fsImpl.rmSync(tempPath, { force: true });
 		}
@@ -59,3 +74,4 @@ export function createAtomicJsonWriter(options: AtomicJsonWriterOptions = {}): (
 
 export const writeAtomicJson = createAtomicJsonWriter();
 export const writePrivateAtomicJson = createAtomicJsonWriter({ mode: 0o600 });
+export const writeAtomicJsonIfAbsent = createAtomicJsonWriter({ replaceExisting: false });
