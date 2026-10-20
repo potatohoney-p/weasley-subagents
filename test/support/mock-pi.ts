@@ -68,7 +68,8 @@ function listQueueFiles(queueDir: string, prefix: string): string[] {
 
 export function createMockPi(): MockPi {
 	const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mock-cli-"));
-	const queueDir = path.join(rootDir, "queue");
+	let queueDir = path.join(rootDir, "queue");
+	let queueGeneration = 0;
 	const binDir = path.join(rootDir, "bin");
 	const piPackageDir = path.join(rootDir, "pi-package");
 	const cliScriptPath = path.join(piPackageDir, "dist", "cli.mjs");
@@ -143,12 +144,12 @@ export function createMockPi(): MockPi {
 		},
 		reset() {
 			nextSequence = 0;
+			// Detached runners inherit this directory. Keep their responses and call
+			// records isolated if they outlive a test and launch another child later.
+			// Retain old generations until uninstall instead of reusing their names.
+			queueDir = path.join(rootDir, `queue-${++queueGeneration}`);
 			ensureDir(queueDir);
-			for (const entry of fs.readdirSync(queueDir)) {
-				try {
-					fs.rmSync(path.join(queueDir, entry), { recursive: true, force: true });
-				} catch {}
-			}
+			if (installed) process.env.MOCK_PI_QUEUE_DIR = queueDir;
 		},
 		callCount() {
 			return listQueueFiles(queueDir, CALL_PREFIX).length;
