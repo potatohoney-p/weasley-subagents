@@ -1022,11 +1022,14 @@ function runVerifyCommand(command: AcceptanceVerifyCommand, defaultCwd: string, 
 		timeout.unref?.();
 		if (options.signal?.aborted) abortVerification();
 		else options.signal?.addEventListener("abort", abortVerification, { once: true });
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdout += chunk.toString();
+		// Decode across pipe reads so split UTF-8 characters survive in evidence.
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			stdout += chunk;
 		});
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+		child.stderr.on("data", (chunk: string) => {
+			stderr += chunk;
 		});
 		child.on("close", (exitCode) => {
 			const passed = exitCode === 0 && !timedOut;
