@@ -1,0 +1,246 @@
+import assert from "node:assert/strict";
+import childProcess, { ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import * as os from "node:os";
+import * as path from "node:path";
+import { PassThrough } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
+import { it, type TestContext } from "node:test";
+import { acceptanceCleanupWarning, acceptanceFailureMessage, buildSkippedAcceptanceLedger, evaluateAcceptance, resolveEffectiveAcceptance } from "../../src/runs/shared/acceptance.ts";
+
+async function waitFor(check: () => boolean, message: string, timeout = 5_000) {
+	const deadline = Date.now() + timeout;
+	while (!check() && Date.now() < deadline) await delay(10);
+	assert.ok(check(), message);
+}
+
+function alive(pid: number): boolean {
+	try { process.kill(pid, 0); return true; }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+		throw error;
+	}
+}
+
+function fixture(t: TestContext, mode: "normal" | "root-exit" | "resist" = "normal") {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acceptance-cleanup-"));
+	const script = path.join(cwd, "child.cjs");
+	const ready = path.join(cwd, "ready.json");
+	const proceed = path.join(cwd, "proceed");
+	const lateWrite = path.join(cwd, "late-write");
+	fs.writeFileSync(script, `
+const fs = require("node:fs");
+const path = require("node:path");
+const dir = __dirname;
+if (process.argv[2] === "root-exit") {
+  require("node:child_process").spawn(process.execPath, [__filename], { stdio: ["ignore", 1, 2] });
+  const ready = setInterval(() => {
+    if (fs.existsSync(path.join(dir, "ready.json"))) process.exit(0);
+  }, 5);
+  setTimeout(() => process.exit(99), 5000).unref();
+} else {
+if (process.argv[2] === "resist") process.on("SIGTERM", () => fs.writeFileSync(path.join(dir, "term"), "received"));
+process.stdout.write("verification stdout\\n");
+process.stderr.write("verification stderr\\n");
+const timer = setInterval(() => {
+  if (fs.existsSync(path.join(dir, "proceed"))) {
+    fs.writeFileSync(path.join(dir, "late-write"), "descendant was still alive");
+    clearInterval(timer);
+  }
+}, 10);
+setTimeout(() => clearInterval(timer), 8000).unref();
+fs.writeFileSync(path.join(dir, "ready.json"), JSON.stringify({ pid: process.pid }));
+}
+`);
+	t.after(async () => {
+		// Let a baseline survivor exit itself; no unrelated PID is targeted.
+		fs.writeFileSync(proceed, "fixture cleanup");
+		if (fs.existsSync(ready)) {
+			const { pid } = JSON.parse(fs.readFileSync(ready, "utf8"));
+			await waitFor(() => !alive(pid), "fixture exits", 9_000);
+		}
+		fs.rmSync(cwd, { recursive: true, force: true });
+	});
+	return { cwd, script, ready, proceed, lateWrite, command: `"${process.execPath}" "${script}" ${mode}` };
+}
+
+function verify(command: string, cwd: string, signal?: AbortSignal, timeoutMs = 10_000, allowFailure = false, nextCommand?: string) {
+	const acceptance = resolveEffectiveAcceptance({
+		agentName: "worker", task: "Verify", agentContract: { version: 1 },
+		explicit: { level: "verified", verify: [{ id: "command", command, timeoutMs, allowFailure }, ...(nextCommand ? [{ id: "next", command: nextCommand }] : [])] },
+	});
+	return evaluateAcceptance({ acceptance, cwd, output: "", signal, reportOptional: true });
+}
+
+function observeSpawns(t: TestContext, observe: (args: Parameters<typeof childProcess.spawn>, real: typeof childProcess.spawn) => ChildProcess) {
+	const real = childProcess.spawn;
+	const mock = t.mock.method(childProcess, "spawn", (...args: Parameters<typeof real>) => observe(args, real));
+	syncBuiltinESMExports();
+	t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+	return mock;
+}
+
+function isTerminationHelper(command: unknown) {
+	return typeof command === "string" && /[\\/]taskkill\.exe$/i.test(command);
+}
+
+for (const mode of ["cancel", "timeout"] as const) {
+	it(`terminates the verification descendant before ${mode} cleanup settles`, async (t) => {
+		const child = fixture(t);
+		const controller = new AbortController();
+		const pending = verify(child.command, child.cwd, controller.signal, mode === "timeout" ? 2_000 : 10_000, true, child.command);
+		await waitFor(() => fs.existsSync(child.ready), "descendant is ready before cancellation/timeout", 1_500);
+		const { pid } = JSON.parse(fs.readFileSync(child.ready, "utf8"));
+		if (mode === "cancel") controller.abort();
+		const ledger = await pending;
+		t.diagnostic(JSON.stringify(ledger.verifyRuns[0]?.termination));
+		fs.writeFileSync(child.proceed, "evaluation already settled");
+		assert.equal(ledger.status, "rejected");
+		assert.equal(ledger.verifyRuns.length, 1, "no later command after cancellation or timeout, even with allowFailure");
+		assert.equal(ledger.verifyRuns[0]?.status, "timed-out");
+		assert.equal(ledger.verifyRuns[0]?.stdout, "verification stdout");
+		assert.match(ledger.verifyRuns[0]?.stderr ?? "", /verification stderr/);
+		assert.equal(alive(pid), false, "owned descendant has exited, not just its shell");
+		assert.equal(fs.existsSync(child.lateWrite), false, "no mutation after settlement");
+	});
+}
+
+it("preserves stdout, stderr, exit codes and allowFailure on ordinary completion", async (t) => {
+	const child = fixture(t);
+	const script = path.join(child.cwd, "ordinary.cjs");
+	fs.writeFileSync(script, 'process.stdout.write("out\\n"); process.stderr.write("err\\n"); process.exitCode = Number(process.argv[2]);');
+	let helperCalls = 0;
+	observeSpawns(t, (args, real) => {
+		if (isTerminationHelper(args[0])) { helperCalls++; throw new Error("unexpected termination after completion"); }
+		return real(...args);
+	});
+	for (const code of [0, 7]) for (const allowFailure of [false, true]) {
+		const controller = new AbortController();
+		const ledger = await verify(`"${process.execPath}" "${script}" ${code}`, child.cwd, controller.signal, 10_000, allowFailure);
+		assert.deepEqual([ledger.verifyRuns[0]?.stdout, ledger.verifyRuns[0]?.stderr, ledger.verifyRuns[0]?.exitCode], ["out", "err", code]);
+		assert.equal(ledger.verifyRuns[0]?.status, code === 0 ? "passed" : allowFailure ? "allowed-failure" : "failed");
+		assert.equal(ledger.verifyRuns[0]?.termination, undefined);
+		controller.abort();
+	}
+	assert.equal(helperCalls, 0);
+});
+
+it("reports unconfirmed cleanup when cancellation races Windows root exit without reusing its PID", { skip: process.platform !== "win32" }, async (t) => {
+	const child = fixture(t, "root-exit");
+	const controller = new AbortController();
+	let rootExited = false;
+	let helperCalls = 0;
+	observeSpawns(t, (args, real) => {
+		if (isTerminationHelper(args[0])) { helperCalls++; throw new Error("must not target an exited root PID"); }
+		const root = real(...args);
+		root.once("exit", () => { rootExited = true; controller.abort(); });
+		return root;
+	});
+	const pending = verify(child.command, child.cwd, controller.signal);
+	await waitFor(() => rootExited && fs.existsSync(child.ready), "root exits while descendant is still running");
+	const ledger = await pending;
+	assert.equal(helperCalls, 0);
+	assert.equal(ledger.verifyRuns[0]?.exitCode, 0);
+	assert.equal(ledger.verifyRuns[0]?.termination?.outcome, "unconfirmed");
+	assert.match(acceptanceFailureMessage(ledger) ?? "", /already exited/);
+});
+
+for (const failure of ["denial", "deadline"] as const) {
+	it(`retains output and reports simulated Windows cleanup ${failure}`, { skip: process.platform !== "win32" }, async (t) => {
+		const child = fixture(t);
+		let helperCalls = 0;
+		let deadlineKills = 0;
+		observeSpawns(t, (args, real) => {
+			if (!isTerminationHelper(args[0])) return real(...args);
+			helperCalls++;
+			// No taskkill is executed: exercise reporting and bounded local handles.
+			const helper = new ChildProcess();
+			helper.stderr = new PassThrough();
+			if (failure === "denial") queueMicrotask(() => {
+				helper.stderr?.emit("data", "simulated access denied");
+				helper.emit("close", 1, null);
+			});
+			else t.mock.method(helper, "kill", () => {
+				deadlineKills++;
+				queueMicrotask(() => helper.emit("close", null, "SIGKILL"));
+				return true;
+			});
+			return helper;
+		});
+		const controller = new AbortController();
+		const pending = verify(child.command, child.cwd, controller.signal, 10_000, true, child.command);
+		await waitFor(() => fs.existsSync(child.ready), "descendant ready");
+		controller.abort();
+		controller.abort();
+		const ledger = await pending;
+		assert.equal(helperCalls, 1);
+		assert.equal(deadlineKills, failure === "deadline" ? 1 : 0);
+		assert.equal(ledger.status, "rejected");
+		assert.equal(ledger.verifyRuns.length, 1, "no later command after cancellation");
+		assert.equal(ledger.verifyRuns[0]?.stdout, "verification stdout");
+		assert.equal(ledger.verifyRuns[0]?.stderr, "verification stderr");
+		assert.equal(ledger.verifyRuns[0]?.termination?.outcome, "unconfirmed");
+		assert.match(acceptanceCleanupWarning(ledger) ?? "", failure === "denial" ? /simulated access denied/ : /deadline/);
+		const stopped = buildSkippedAcceptanceLedger(ledger.effectiveAcceptance, { id: "stopped", message: "Stopped", verifyRuns: ledger.verifyRuns });
+		assert.deepEqual(stopped.verifyRuns, ledger.verifyRuns);
+		assert.match(acceptanceFailureMessage(stopped) ?? "", /cleanup unconfirmed/);
+	});
+}
+
+it("escalates an owned POSIX group containing a SIGTERM-resistant descendant", { skip: process.platform === "win32" }, async (t) => {
+	const child = fixture(t, "resist");
+	const controller = new AbortController();
+	const pending = verify(child.command, child.cwd, controller.signal);
+	await waitFor(() => fs.existsSync(child.ready), "resistant descendant ready");
+	const { pid } = JSON.parse(fs.readFileSync(child.ready, "utf8"));
+	controller.abort();
+	const ledger = await pending;
+	assert.ok(fs.existsSync(path.join(child.cwd, "term")), "graceful signal reached descendant");
+	assert.equal(alive(pid), false);
+	assert.equal(ledger.status, "rejected");
+	assert.equal(ledger.verifyRuns[0]?.termination?.method, "posix-process-group");
+});
+
+it("cleans up a POSIX group after its shell exits with inherited pipes still open", { skip: process.platform === "win32" }, async (t) => {
+	const child = fixture(t, "root-exit");
+	const controller = new AbortController();
+	let rootExited = false;
+	observeSpawns(t, (args, real) => {
+		const root = real(...args);
+		root.once("exit", () => { rootExited = true; controller.abort(); });
+		return root;
+	});
+	const pending = verify(child.command, child.cwd, controller.signal);
+	await waitFor(() => rootExited && fs.existsSync(child.ready), "root exits after descendant readiness");
+	const { pid } = JSON.parse(fs.readFileSync(child.ready, "utf8"));
+	const ledger = await pending;
+	assert.equal(ledger.status, "rejected");
+	assert.equal(ledger.verifyRuns[0]?.exitCode, 0);
+	assert.equal(ledger.verifyRuns[0]?.stdout, "verification stdout");
+	assert.equal(ledger.verifyRuns[0]?.stderr, "verification stderr");
+	assert.equal(ledger.verifyRuns[0]?.termination?.method, "posix-process-group");
+	assert.equal(alive(pid), false, "group ownership survives shell exit");
+});
+
+it("keeps another verification and an unrelated sentinel alive during cleanup", async (t) => {
+	const target = fixture(t);
+	const other = fixture(t);
+	const sentinel = fixture(t);
+	const sentinelProcess = childProcess.spawn(process.execPath, [sentinel.script], { stdio: "ignore", windowsHide: true });
+	const controller = new AbortController();
+	const targetPending = verify(target.command, target.cwd, controller.signal);
+	const otherPending = verify(other.command, other.cwd);
+	await waitFor(() => [target, other, sentinel].every(child => fs.existsSync(child.ready)), "all isolated processes ready");
+	controller.abort();
+	const ledger = await targetPending;
+	assert.equal(ledger.status, "rejected");
+	const { pid: targetPid } = JSON.parse(fs.readFileSync(target.ready, "utf8"));
+	assert.equal(alive(targetPid), false, "the canceled verification ended before the isolation challenge");
+	fs.writeFileSync(other.proceed, "unrelated verification challenge");
+	fs.writeFileSync(sentinel.proceed, "unrelated sentinel challenge");
+	assert.equal((await otherPending).status, "verified");
+	await waitFor(() => fs.existsSync(sentinel.lateWrite), "sentinel answers challenge after target cleanup");
+	assert.ok(fs.existsSync(other.lateWrite));
+	assert.equal(sentinelProcess.killed, false);
+});
