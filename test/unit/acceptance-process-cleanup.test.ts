@@ -23,7 +23,64 @@ function alive(pid: number): boolean {
 	}
 }
 
+interface FixtureScope {
+	fixtures: { cwd: string; ready: string; proceed: string }[];
+	roots: { closed: boolean }[];
+	pending: Promise<unknown>[];
+	observe?: (args: Parameters<typeof childProcess.spawn>, real: typeof childProcess.spawn) => ChildProcess;
+}
+
+const scopes = new WeakMap<TestContext, FixtureScope>();
+const scopesByCwd = new Map<string, FixtureScope>();
+
+function fixtureScope(t: TestContext): FixtureScope {
+	const existing = scopes.get(t);
+	if (existing) return existing;
+	const scope: FixtureScope = { fixtures: [], roots: [], pending: [] };
+	scopes.set(t, scope);
+	const real = childProcess.spawn;
+	const mock = t.mock.method(childProcess, "spawn", (...args: Parameters<typeof real>) => {
+		const root = scope.observe ? scope.observe(args, real) : real(...args);
+		if (!isTerminationHelper(args[0])) {
+			const state = { closed: false };
+			scope.roots.push(state);
+			root.once("close", () => { state.closed = true; });
+		}
+		return root;
+	});
+	syncBuiltinESMExports();
+	t.after(async () => {
+		try {
+			// Release every fixture before waiting, including concurrent verifications.
+			let releaseError: unknown;
+			for (const child of scope.fixtures) {
+				try { fs.writeFileSync(child.proceed, "fixture cleanup"); }
+				catch (error) { releaseError ??= error; }
+			}
+			// Keep simulated cleanup installed while any verification can still time out.
+			await Promise.allSettled(scope.pending);
+			await waitFor(() => scope.roots.every(root => root.closed), "owned shells and their pipes close before directory cleanup", 9_000);
+			if (releaseError) throw releaseError;
+			for (const child of scope.fixtures) {
+				if (fs.existsSync(child.ready)) {
+					const { pid } = JSON.parse(fs.readFileSync(child.ready, "utf8"));
+					await waitFor(() => !alive(pid), "fixture descendant exits", 9_000);
+				}
+				fs.rmSync(child.cwd, { recursive: true, force: true });
+			}
+		} finally {
+			// Automatic mock restoration does not update already-synchronized ESM exports.
+			// Restore those even when filesystem teardown throws.
+			mock.mock.restore();
+			syncBuiltinESMExports();
+			for (const child of scope.fixtures) scopesByCwd.delete(child.cwd);
+		}
+	});
+	return scope;
+}
+
 function fixture(t: TestContext, mode: "normal" | "root-exit" | "resist" = "normal") {
+	const scope = fixtureScope(t);
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acceptance-cleanup-"));
 	const script = path.join(cwd, "child.cjs");
 	const ready = path.join(cwd, "ready.json");
@@ -53,15 +110,8 @@ setTimeout(() => clearInterval(timer), 8000).unref();
 fs.writeFileSync(path.join(dir, "ready.json"), JSON.stringify({ pid: process.pid }));
 }
 `);
-	t.after(async () => {
-		// Let a baseline survivor exit itself; no unrelated PID is targeted.
-		fs.writeFileSync(proceed, "fixture cleanup");
-		if (fs.existsSync(ready)) {
-			const { pid } = JSON.parse(fs.readFileSync(ready, "utf8"));
-			await waitFor(() => !alive(pid), "fixture exits", 9_000);
-		}
-		fs.rmSync(cwd, { recursive: true, force: true });
-	});
+	scope.fixtures.push({ cwd, ready, proceed });
+	scopesByCwd.set(cwd, scope);
 	return { cwd, script, ready, proceed, lateWrite, command: `"${process.execPath}" "${script}" ${mode}` };
 }
 
@@ -70,15 +120,13 @@ function verify(command: string, cwd: string, signal?: AbortSignal, timeoutMs = 
 		agentName: "worker", task: "Verify", agentContract: { version: 1 },
 		explicit: { level: "verified", verify: [{ id: "command", command, timeoutMs, allowFailure }, ...(nextCommand ? [{ id: "next", command: nextCommand }] : [])] },
 	});
-	return evaluateAcceptance({ acceptance, cwd, output: "", signal, reportOptional: true });
+	const pending = evaluateAcceptance({ acceptance, cwd, output: "", signal, reportOptional: true });
+	scopesByCwd.get(cwd)?.pending.push(pending);
+	return pending;
 }
 
 function observeSpawns(t: TestContext, observe: (args: Parameters<typeof childProcess.spawn>, real: typeof childProcess.spawn) => ChildProcess) {
-	const real = childProcess.spawn;
-	const mock = t.mock.method(childProcess, "spawn", (...args: Parameters<typeof real>) => observe(args, real));
-	syncBuiltinESMExports();
-	t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
-	return mock;
+	fixtureScope(t).observe = observe;
 }
 
 function isTerminationHelper(command: unknown) {
@@ -234,6 +282,7 @@ it("keeps another verification and an unrelated sentinel alive during cleanup", 
 	await waitFor(() => [target, other, sentinel].every(child => fs.existsSync(child.ready)), "all isolated processes ready");
 	controller.abort();
 	const ledger = await targetPending;
+	t.diagnostic(JSON.stringify(ledger.verifyRuns[0]?.termination));
 	assert.equal(ledger.status, "rejected");
 	const { pid: targetPid } = JSON.parse(fs.readFileSync(target.ready, "utf8"));
 	assert.equal(alive(targetPid), false, "the canceled verification ended before the isolation challenge");
