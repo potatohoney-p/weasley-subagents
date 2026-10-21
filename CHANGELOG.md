@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Preserve UTF-8 characters split across subprocess pipe reads in acceptance verification output.
+
 ## [0.39.0] - 2026-08-02
 
 ### Added
