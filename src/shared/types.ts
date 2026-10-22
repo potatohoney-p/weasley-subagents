@@ -716,6 +716,12 @@ export interface AcceptanceVerifyResult {
 	stdout?: string;
 	stderr?: string;
 	durationMs: number;
+	/** Cleanup evidence is scoped to the owned command tree/group, not escaped processes. */
+	termination?: {
+		method: "windows-taskkill" | "posix-process-group";
+		outcome: "group-exited" | "attempted" | "unconfirmed";
+		detail: string;
+	};
 }
 
 export interface AcceptanceReviewResult {

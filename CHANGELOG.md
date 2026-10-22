@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Attempt owned-process cleanup when acceptance verification is canceled or times out, retain cleanup uncertainty in background results, and stop subsequent verification commands after a timeout.
+
 ## [0.39.0] - 2026-08-02
 
 ### Added

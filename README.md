@@ -192,6 +192,8 @@ Treat these files as local operational data. They are ignored by this repository
 
 Subagents still execute model-generated actions. Review requested permissions, keep credentials out of prompts and repositories, and use the narrowest useful tool set.
 
+Canceled or timed-out acceptance verification stops subsequent verification commands and attempts bounded process cleanup. POSIX cleanup targets the verification's own process group; processes that leave that group are outside its scope. Windows cleanup requests termination of the live verification shell's tree. An exited Windows shell, a failed cleanup command, or a cleanup deadline leaves termination unconfirmed. Verification results retain this evidence in `verifyRuns[].termination`, and background results surface a cleanup warning. Ordinary command completion does not trigger descendant cleanup.
+
 ## Public APIs
 
 The package exports:

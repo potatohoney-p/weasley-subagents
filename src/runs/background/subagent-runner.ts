@@ -110,7 +110,7 @@ import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { launchBindingDigest } from "../../shared/launch-contract.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
-import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceCleanupWarning, acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
 import { attachContractProjections, isAgentContractV1 } from "../shared/agent-contract.ts";
 import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
 import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
@@ -1531,9 +1531,9 @@ async function runSingleStep(
 	const turnBudgetExceeded = finalResult?.turnBudgetExceeded === true;
 	const effectiveAcceptance = step.effectiveAcceptance
 		? stoppedAfterAcceptance
-			? buildSkippedAcceptanceLedger(step.effectiveAcceptance, { id: "stopped", message: "Acceptance was not evaluated because the subagent was stopped." })
+			? buildSkippedAcceptanceLedger(step.effectiveAcceptance, { id: "stopped", message: "Acceptance did not complete because the subagent was stopped.", verifyRuns: acceptance?.verifyRuns })
 			: timedOutAfterAcceptance
-				? buildSkippedAcceptanceLedger(step.effectiveAcceptance, { id: "timeout", message: "Acceptance was not evaluated because the subagent timed out." })
+				? buildSkippedAcceptanceLedger(step.effectiveAcceptance, { id: "timeout", message: "Acceptance did not complete because the subagent timed out.", verifyRuns: acceptance?.verifyRuns })
 				: turnBudgetExceeded
 					? buildSkippedAcceptanceLedger(step.effectiveAcceptance, { id: "turn-budget", message: "Acceptance was not evaluated because the subagent exceeded its turn budget." })
 					: acceptance
@@ -1542,9 +1542,9 @@ async function runSingleStep(
 	const acceptanceCanFailRun = acceptanceFailure && effectiveAcceptance?.explicit && (finalResult?.exitCode ?? 1) === 0 && !finalResult?.interrupted && !timedOutAfterAcceptance && !stoppedAfterAcceptance && !turnBudgetExceeded && !isAgentContractV1(step.agentContract);
 	const effectiveFinalExitCode = timedOutAfterAcceptance || stoppedAfterAcceptance || turnBudgetExceeded ? 1 : acceptanceCanFailRun ? 1 : finalResult?.exitCode ?? 1;
 	const effectiveFinalError = stoppedAfterAcceptance
-		? ctx.stopMessage ?? "Subagent stopped by user."
+		? [ctx.stopMessage ?? "Subagent stopped by user.", acceptanceCleanupWarning(acceptance)].filter(Boolean).join(" ")
 		: timedOutAfterAcceptance
-			? ctx.timeoutMessage ?? "Subagent timed out."
+			? [ctx.timeoutMessage ?? "Subagent timed out.", acceptanceCleanupWarning(acceptance)].filter(Boolean).join(" ")
 			: turnBudgetExceeded
 				? finalResult?.error ?? (turnBudget ? turnBudgetExceededMessage(turnBudget, turnBudget.turnCount) : "Subagent exceeded turn budget.")
 				: acceptanceCanFailRun
@@ -3096,11 +3096,15 @@ async function runSubagent(
 					: undefined;
 				const groupStopped = stopped || stopAbortController.signal.aborted;
 				const groupTimedOut = !groupStopped && (timedOut || timeoutAbortController.signal.aborted);
-				const effectiveGroupAcceptance = groupTimedOut || groupStopped ? undefined : groupAcceptance;
+				const effectiveGroupAcceptance = groupTimedOut || groupStopped
+					? buildSkippedAcceptanceLedger(effectiveDynamicGroupAcceptance, { id: groupStopped ? "stopped" : "timeout", message: "Acceptance verification was interrupted.", verifyRuns: groupAcceptance?.verifyRuns })
+					: groupAcceptance;
 				if (placeholder && effectiveGroupAcceptance) placeholder.acceptance = effectiveGroupAcceptance;
 				const groupAcceptanceFailure = effectiveGroupAcceptance && (!isAgentContractV1(step.agentContract) || step.gateOn === "acceptance") ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
 				if (groupTimedOut || groupStopped || groupAcceptanceFailure) {
-					const errorMessage = groupStopped ? stopMessage : groupTimedOut ? timeoutMessage ?? "Subagent timed out." : groupAcceptanceFailure!;
+					const errorMessage = groupStopped || groupTimedOut
+						? [groupStopped ? stopMessage : timeoutMessage ?? "Subagent timed out.", acceptanceCleanupWarning(groupAcceptance)].filter(Boolean).join(" ")
+						: groupAcceptanceFailure!;
 					statusPayload.state = groupStopped ? "stopped" : "failed";
 					statusPayload.error = errorMessage;
 					statusPayload.stopped = groupStopped ? true : statusPayload.stopped;
@@ -3454,9 +3458,13 @@ async function runSubagent(
 						: undefined;
 					const groupStopped = stopped || stopAbortController.signal.aborted;
 					const groupTimedOut = !groupStopped && (timedOut || timeoutAbortController.signal.aborted);
-					const effectiveGroupAcceptance = groupTimedOut || groupStopped ? undefined : groupAcceptance;
+					const effectiveGroupAcceptance = groupTimedOut || groupStopped
+						? buildSkippedAcceptanceLedger(effectiveDynamicGroupAcceptance, { id: groupStopped ? "stopped" : "timeout", message: "Acceptance verification was interrupted.", verifyRuns: groupAcceptance?.verifyRuns })
+						: groupAcceptance;
 					const groupAcceptanceFailure = effectiveDynamicGroupAcceptance.explicit && effectiveGroupAcceptance && (!isAgentContractV1(step.agentContract) || step.gateOn === "acceptance") ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
-					const groupError = groupStopped ? stopMessage : groupTimedOut ? timeoutMessage ?? "Subagent timed out." : groupAcceptanceFailure;
+					const groupError = groupStopped || groupTimedOut
+						? [groupStopped ? stopMessage : timeoutMessage ?? "Subagent timed out.", acceptanceCleanupWarning(groupAcceptance)].filter(Boolean).join(" ")
+						: groupAcceptanceFailure;
 					markDynamicGraphGroup(stepIndex, groupError ? groupStopped ? "stopped" : "failed" : "completed", groupError, effectiveGroupAcceptance);
 					if (groupError) {
 						results.push({
