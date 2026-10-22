@@ -212,8 +212,16 @@ for (const failure of ["denial", "deadline"] as const) {
 		const child = fixture(t);
 		let helperCalls = 0;
 		let deadlineKills = 0;
+		let root: ChildProcess | undefined;
+		let capturedStdout = "";
+		let capturedStderr = "";
 		observeSpawns(t, (args, real) => {
-			if (!isTerminationHelper(args[0])) return real(...args);
+			if (!isTerminationHelper(args[0])) {
+				root = real(...args);
+				root.stdout?.on("data", chunk => { capturedStdout += chunk.toString(); });
+				root.stderr?.on("data", chunk => { capturedStderr += chunk.toString(); });
+				return root;
+			}
 			helperCalls++;
 			// No taskkill is executed: exercise reporting and bounded local handles.
 			const helper = new ChildProcess();
@@ -231,7 +239,18 @@ for (const failure of ["denial", "deadline"] as const) {
 		});
 		const controller = new AbortController();
 		const pending = verify(child.command, child.cwd, controller.signal, 10_000, true, child.command);
+		assert.ok(root);
+		// Hold actual pipe delivery to prove the file-based readiness marker can
+		// arrive first. Cleanup uncertainty preserves only output already captured.
+		root.stdout?.pause();
+		root.stderr?.pause();
 		await waitFor(() => fs.existsSync(child.ready), "descendant ready");
+		assert.equal(capturedStdout, "", "child readiness does not imply stdout delivery");
+		assert.equal(capturedStderr, "", "child readiness does not imply stderr delivery");
+		root.stdout?.resume();
+		root.stderr?.resume();
+		await waitFor(() => capturedStdout === "verification stdout\n" && capturedStderr === "verification stderr\n",
+			"both output prefixes reach the parent before simulated cleanup failure");
 		controller.abort();
 		controller.abort();
 		const ledger = await pending;
