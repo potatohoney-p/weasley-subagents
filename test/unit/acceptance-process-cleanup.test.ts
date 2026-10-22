@@ -9,9 +9,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { it, type TestContext } from "node:test";
 import { acceptanceCleanupWarning, acceptanceFailureMessage, buildSkippedAcceptanceLedger, evaluateAcceptance, resolveEffectiveAcceptance } from "../../src/runs/shared/acceptance.ts";
 
-async function waitFor(check: () => boolean, message: string, timeout = 5_000) {
+async function waitFor(check: () => boolean, message: string, timeout = 5_000, pause: (ms: number) => Promise<unknown> = delay) {
 	const deadline = Date.now() + timeout;
-	while (!check() && Date.now() < deadline) await delay(10);
+	while (!check() && Date.now() < deadline) await pause(10);
 	assert.ok(check(), message);
 }
 
@@ -79,7 +79,7 @@ function fixtureScope(t: TestContext): FixtureScope {
 	return scope;
 }
 
-function fixture(t: TestContext, mode: "normal" | "root-exit" | "resist" = "normal") {
+function fixture(t: TestContext, mode: "normal" | "root-exit" | "resist" | "drain" = "normal") {
 	const scope = fixtureScope(t);
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acceptance-cleanup-"));
 	const script = path.join(cwd, "child.cjs");
@@ -90,29 +90,42 @@ function fixture(t: TestContext, mode: "normal" | "root-exit" | "resist" = "norm
 const fs = require("node:fs");
 const path = require("node:path");
 const dir = __dirname;
-if (process.argv[2] === "root-exit") {
-  require("node:child_process").spawn(process.execPath, [__filename], { stdio: ["ignore", 1, 2] });
+if (process.argv[2] === "root-exit" || process.argv[2] === "drain") {
+  const drain = process.argv[2] === "drain";
+  require("node:child_process").spawn(process.execPath, [__filename, drain ? "drain-child" : "normal"], { detached: drain, stdio: ["ignore", 1, 2] });
   const ready = setInterval(() => {
-    if (fs.existsSync(path.join(dir, "ready.json"))) process.exit(0);
+    if (fs.existsSync(path.join(dir, "ready.json"))) process.exit(drain ? 17 : 0);
   }, 5);
   setTimeout(() => process.exit(99), 5000).unref();
 } else {
 if (process.argv[2] === "resist") process.on("SIGTERM", () => fs.writeFileSync(path.join(dir, "term"), "received"));
+// Drain expiry deliberately closes these pipes before the release challenge.
+if (process.argv[2] === "drain-child") {
+  process.stdout.on("error", error => { if (error.code !== "EPIPE") throw error; });
+  process.stderr.on("error", error => { if (error.code !== "EPIPE") throw error; });
+}
 process.stdout.write("verification stdout\\n");
 process.stderr.write("verification stderr\\n");
 const timer = setInterval(() => {
   if (fs.existsSync(path.join(dir, "proceed"))) {
+    if (process.argv[2] === "drain-child") {
+      process.stdout.write("final stdout\\n");
+      process.stderr.write("final stderr\\n");
+    }
     fs.writeFileSync(path.join(dir, "late-write"), "descendant was still alive");
     clearInterval(timer);
   }
 }, 10);
-setTimeout(() => clearInterval(timer), 8000).unref();
+setTimeout(() => {
+  if (process.argv[2] === "drain-child") fs.writeFileSync(path.join(dir, "fallback"), "emergency self-release");
+  clearInterval(timer);
+}, 8000).unref();
 fs.writeFileSync(path.join(dir, "ready.json"), JSON.stringify({ pid: process.pid }));
 }
 `);
 	scope.fixtures.push({ cwd, ready, proceed });
 	scopesByCwd.set(cwd, scope);
-	return { cwd, script, ready, proceed, lateWrite, command: `"${process.execPath}" "${script}" ${mode}` };
+	return { cwd, script, ready, proceed, lateWrite, command: `${mode === "drain" ? "exec " : ""}"${process.execPath}" "${script}" ${mode}` };
 }
 
 function verify(command: string, cwd: string, signal?: AbortSignal, timeoutMs = 10_000, allowFailure = false, nextCommand?: string) {
@@ -293,3 +306,104 @@ it("keeps another verification and an unrelated sentinel alive during cleanup", 
 	assert.ok(fs.existsSync(other.lateWrite));
 	assert.equal(sentinelProcess.killed, false);
 });
+
+for (const completion of ["before deadline", "at expiry"] as const) {
+	it(`retains final output-drain evidence ${completion}`, { skip: process.platform === "win32", timeout: 12_000 }, async (t) => {
+		// The child escapes the owned group but retains both output pipes. It exits
+		// on a release gate or its eight-second self-release, without any test kill.
+		const child = fixture(t, "drain");
+		const controller = new AbortController();
+		let rootExited = false;
+		let rootClosed = false;
+		let capturedStdout = "";
+		let capturedStderr = "";
+		observeSpawns(t, (args, real) => {
+			const root = real(...args);
+			root.once("exit", () => { rootExited = true; });
+			root.once("close", () => { rootClosed = true; });
+			root.stdout?.on("data", chunk => { capturedStdout += chunk.toString(); });
+			root.stderr?.on("data", chunk => { capturedStderr += chunk.toString(); });
+			return root;
+		});
+		let settled = false;
+		const realSetTimeout = globalThis.setTimeout;
+		const realClearTimeout = globalThis.clearTimeout;
+		const realPause = (ms: number) => new Promise<void>(resolve => { realSetTimeout(resolve, ms); });
+		let watchdog: NodeJS.Timeout | undefined;
+		// Enable before verification creates its timeout, so all production timeout
+		// handles use the same clock. Readiness and teardown use preserved real timers.
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const pending = verify(child.command, child.cwd, controller.signal).then(ledger => {
+			settled = true;
+			return ledger;
+		});
+		try {
+			await waitFor(() => rootExited && fs.existsSync(child.ready)
+				&& capturedStdout === "verification stdout\n" && capturedStderr === "verification stderr\n",
+				"root exits after descendant readiness and both output prefixes arrive", 5_000, realPause);
+			const { pid } = JSON.parse(fs.readFileSync(child.ready, "utf8"));
+			assert.equal(rootClosed, false, "escaped descendant still holds both pipes");
+			assert.equal(alive(pid), true);
+			assert.equal(settled, false);
+
+			// Only virtual time controls the drain deadline; actual subprocess IO remains
+			// event-driven. Keep an independent real-time watchdog for a broken drain.
+			const bounded = Promise.race([pending, new Promise<never>((_, reject) => {
+				watchdog = realSetTimeout(() => reject(new Error("output drain did not settle")), 5_000);
+			})]);
+			controller.abort();
+			// cleanupVerificationProcess resolves after ESRCH for the exited group.
+			await Promise.resolve();
+			t.mock.timers.tick(249);
+			await Promise.resolve();
+			assert.equal(settled, false, "draining remains pending before the deadline");
+			if (completion === "before deadline") fs.writeFileSync(child.proceed, "finish both output streams");
+			else t.mock.timers.tick(1);
+			const ledger = await bounded;
+			const result = ledger.verifyRuns[0];
+			assert.equal(ledger.status, "rejected");
+			assert.equal(ledger.verifyRuns.length, 1);
+			assert.equal(result?.status, "timed-out");
+			assert.equal(result?.exitCode, 17, "retain the actual root exit code");
+			assert.equal(result?.termination?.method, "posix-process-group");
+			assert.equal(fs.existsSync(path.join(child.cwd, "fallback")), false, "emergency self-release cannot satisfy the test");
+			if (completion === "before deadline") {
+				assert.equal(rootClosed, true, "actual EOF completes the drain before virtual expiry");
+				assert.equal(result?.stdout, "verification stdout\nfinal stdout");
+				assert.equal(result?.stderr, "verification stderr\nfinal stderr");
+				assert.equal(result?.termination?.outcome, "group-exited");
+				assert.equal(acceptanceCleanupWarning(ledger), undefined);
+			} else {
+				assert.equal(alive(pid), true, "the gated survivor must not be reported terminated");
+				assert.equal(fs.existsSync(child.proceed), false);
+				assert.equal(result?.stdout, "verification stdout");
+				assert.equal(result?.stderr, "verification stderr");
+				assert.equal(result?.termination?.outcome, "unconfirmed");
+				assert.match(result?.termination?.detail ?? "", /output pipes did not close before the drain deadline/);
+				assert.match(acceptanceCleanupWarning(ledger) ?? "", /escaped descendants may remain/);
+			}
+			const snapshot = JSON.stringify(ledger);
+			fs.writeFileSync(child.proceed, "release after checking settled evidence");
+			await waitFor(() => !alive(pid), "escaped fixture exits after its release challenge", 5_000, realPause);
+			assert.equal(fs.existsSync(child.lateWrite), true, "fixture answered its release gate");
+			assert.equal(fs.existsSync(path.join(child.cwd, "fallback")), false);
+			t.mock.timers.tick(1);
+			await Promise.resolve();
+			assert.equal(JSON.stringify(ledger), snapshot, "later clock ticks cannot replace settled evidence");
+		} finally {
+			try {
+				// Failed assertions must also release the actual child and advance any
+				// pending cleanup before restoring the clock for FixtureScope teardown.
+				fs.writeFileSync(child.proceed, "fixture cleanup");
+				controller.abort();
+				await waitFor(() => {
+					t.mock.timers.tick(250);
+					return settled;
+				}, "verification settles before timer restoration", 5_000, realPause);
+			} finally {
+				t.mock.timers.reset();
+				if (watchdog) realClearTimeout(watchdog);
+			}
+		}
+	});
+}
