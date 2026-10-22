@@ -329,6 +329,7 @@ for (const completion of ["before deadline", "at expiry"] as const) {
 		const realSetTimeout = globalThis.setTimeout;
 		const realClearTimeout = globalThis.clearTimeout;
 		const realPause = (ms: number) => new Promise<void>(resolve => { realSetTimeout(resolve, ms); });
+		const nextTurn = () => new Promise<void>(resolve => { setImmediate(resolve); });
 		let watchdog: NodeJS.Timeout | undefined;
 		// Enable before verification creates its timeout, so all production timeout
 		// handles use the same clock. Readiness and teardown use preserved real timers.
@@ -353,9 +354,11 @@ for (const completion of ["before deadline", "at expiry"] as const) {
 			})]);
 			controller.abort();
 			// cleanupVerificationProcess resolves after ESRCH for the exited group.
-			await Promise.resolve();
+			await nextTurn();
+			assert.equal(settled, false, "group exit starts a drain instead of settling early");
 			t.mock.timers.tick(249);
-			await Promise.resolve();
+			// A full turn drains every link of evaluateAcceptance's promise chain.
+			await nextTurn();
 			assert.equal(settled, false, "draining remains pending before the deadline");
 			if (completion === "before deadline") fs.writeFileSync(child.proceed, "finish both output streams");
 			else t.mock.timers.tick(1);
@@ -388,7 +391,7 @@ for (const completion of ["before deadline", "at expiry"] as const) {
 			assert.equal(fs.existsSync(child.lateWrite), true, "fixture answered its release gate");
 			assert.equal(fs.existsSync(path.join(child.cwd, "fallback")), false);
 			t.mock.timers.tick(1);
-			await Promise.resolve();
+			await nextTurn();
 			assert.equal(JSON.stringify(ledger), snapshot, "later clock ticks cannot replace settled evidence");
 		} finally {
 			try {
