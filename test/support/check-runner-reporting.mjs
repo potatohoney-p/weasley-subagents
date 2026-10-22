@@ -7,19 +7,20 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { DefaultSerializer, deserialize } from "node:v8";
 
 const dir = mkdtempSync(join(tmpdir(), "test-report-pipe-"));
 const fixture = join(dir, "fixture.test.mjs");
-const count = 32;
+// Keep the report near one pipe capacity. A much larger report can trigger
+// Writable backpressure before reporter EOF and mask queued-tail loss.
+const count = 8;
 writeFileSync(fixture, `import { test, after } from "node:test";
 import { writeFileSync } from "node:fs";
 const completed = [];
 setTimeout(() => process.exit(99), 8000).unref();
 process.on("exit", code => writeFileSync(process.env.REPORT_EXIT, JSON.stringify({ code, completed, buffered: process.stdout.writableLength })));
 after(() => writeFileSync(process.env.REPORT_DONE, "completed"));
-for (let i = 0; i < ${count}; i++) test("report-" + i + "-" + "x".repeat(4000), () => {
+for (let i = 0; i < ${count}; i++) test("report-" + i + "-" + "x".repeat(2000), () => {
   completed.push(i);
   if (i === ${count - 1} && process.env.REPORT_FAIL === "1") throw new Error("final test failure");
 });
@@ -39,18 +40,34 @@ for (const failLast of [false, true]) {
     let stderr = "";
     child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
     const chunks = [];
+    let readerReleased = false;
+    let childExited = false;
+    let bytesBeforeRelease = 0;
+    let bytesBeforeExit = 0;
+    child.once("exit", () => { childExited = true; });
+    // ChildProcess automatically resumes stdio after exit. Keep a collector
+    // installed from the start so that auto-drain cannot discard report bytes.
+    child.stdout.on("data", chunk => {
+      chunks.push(chunk);
+      if (!readerReleased) bytesBeforeRelease += chunk.length;
+      if (!childExited) bytesBeforeExit += chunk.length;
+    });
+    child.stdout.pause();
     const closed = new Promise((resolve, reject) => {
       child.once("error", reject);
       child.once("close", (code, signal) => resolve({ code, signal }));
     });
-    // Gate only this fixture's reader. The exit marker proves all bodies ran
-    // before we read any verdicts. Windows writes may block before that marker;
+    // Gate only this fixture's reader. Briefly keep this parent out of the event
+    // loop so Readable prefetch cannot enlarge the pipe's effective capacity.
+    // No process is signaled or paused externally. Windows writes may block;
     // always release after 2s, independently of child progress.
     const deadline = Date.now() + 2000;
-    while (!existsSync(exitPath) && Date.now() < deadline) await delay(5);
-    const markerBeforeRead = existsSync(exitPath);
-    const bodiesFinishedBeforeRead = existsSync(donePath);
-    child.stdout.on("data", chunk => chunks.push(chunk));
+    const gate = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(exitPath) && Date.now() < deadline) Atomics.wait(gate, 0, 0, 5);
+    const exitMarkerAtRelease = existsSync(exitPath);
+    const bodiesFinishedAtRelease = existsSync(donePath);
+    readerReleased = true;
+    child.stdout.resume();
     const status = await closed;
     const output = Buffer.concat(chunks);
     const serializer = new DefaultSerializer();
@@ -70,10 +87,10 @@ for (const failLast of [false, true]) {
       (event.type === "test:pass" || event.type === "test:fail") && event.data.details?.type === "test");
     const failures = verdicts.filter(event => event.type === "test:fail").length;
     const evidence = { node: process.version, platform: process.platform, forceExit, failLast,
-      ...status, markerBeforeRead, bodiesFinishedBeforeRead,
-      readerRelease: markerBeforeRead ? "exit-marker" : "deadline",
+      ...status, exitMarkerAtRelease, bodiesFinishedAtRelease, bytesBeforeRelease, bytesBeforeExit,
+      readerRelease: exitMarkerAtRelease ? "exit-marker" : "deadline",
       completed: exit.completed.length, reported: verdicts.length,
-      failures, bufferedAtExit: exit.buffered, incompleteBytes: output.length - offset };
+      failures, receivedBytes: output.length, bufferedAtExit: exit.buffered, incompleteBytes: output.length - offset };
     console.log("[runner-reporting] " + JSON.stringify(evidence));
     writeFileSync(join(dir, `${id}.evidence.json`), JSON.stringify(evidence, null, 2));
     assert.equal(stderr, "");
@@ -86,6 +103,8 @@ for (const failLast of [false, true]) {
       assert.deepEqual(verdicts.map(event => Number(/^report-(\d+)-/.exec(event.data.name)?.[1])).sort((a, b) => a - b),
         expectedIds, "each registered test has exactly one verdict");
       assert.equal(failures, failLast ? 1 : 0, "natural exit retains the last failure");
+      if (failLast) assert.match(verdicts.find(event => event.type === "test:fail").data.name,
+        new RegExp(`^report-${count - 1}-`), "the last test retains its failure verdict");
       assert.equal(output.length - offset, 0, "natural exit leaves no partial event");
     }
   }
