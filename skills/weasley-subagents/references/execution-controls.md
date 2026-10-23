@@ -135,6 +135,8 @@ subagent({
 })
 ```
 
+To join a chosen set of independently launched reviewers while unrelated work continues, use `subagent_wait({ ids: [correctnessRunId, securityRunId], all: true })`. Omit `all` to receive the first selected completion or attention. `ids` accepts 1–100 unique exact async IDs owned by this session, cannot be combined with `id`, and excludes provider items and remembered foreground runs. Only selected runs active at call time are awaited; already-terminal selected runs do not extend the wait. Unknown IDs, disappearing lifecycle state, or a session switch return an error rather than claiming completion. Timeout or abort stops waiting, not the workers.
+
 File-only output mode also works for async single runs, top-level parallel task items, sequential chain steps, and chain parallel task items. In chains, `{previous}` receives the compact saved-file reference when the prior step used file-only mode. Relative chain output paths are resolved under `{chain_dir}`; pass a persistent `chainDir` or an absolute `output` path when a later human or process needs a stable path outside the temp chain run.
 
 For review fanout where the parent continues a local audit:
