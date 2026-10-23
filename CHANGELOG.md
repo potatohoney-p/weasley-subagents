@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Preserve verified child process termination evidence in async and nested status summaries, including retried and stopped children.
+
 ## [0.39.0] - 2026-08-02
 
 ### Added

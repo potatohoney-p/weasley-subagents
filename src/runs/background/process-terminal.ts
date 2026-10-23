@@ -186,7 +186,10 @@ function stepProcessTerminalProof(
 		...(resumeDispositionValue ? { resumeDisposition: resumeDispositionValue } : {}),
 	};
 	if (state === "observed") {
-		return { ...base, state, observedAt: proof.state === "observed" ? proof.observedAt : Date.now(), instances: records };
+		// Child proofs must remain independently valid when status readers sanitize
+		// them. Retain the verified runner close, but never sibling writer records.
+		const runner = proof.instances?.find((instance) => instance.kind === "runner" && instance.processInstanceId === proof.runnerProcessInstanceId);
+		return { ...base, state, observedAt: proof.state === "observed" ? proof.observedAt : Date.now(), instances: runner ? [runner, ...records] : records };
 	}
 	if (state === "unknown") {
 		return { ...base, state, reason: proof.state === "unknown" ? proof.reason : "writer-close-unverified" };
