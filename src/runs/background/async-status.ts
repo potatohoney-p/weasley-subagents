@@ -118,6 +118,8 @@ interface AsyncRunListOptions {
 	now?: () => number;
 	reconcile?: boolean;
 	runId?: string;
+	/** Do not fall back to prefix matches; reject inconsistent selected identities. */
+	exactRunId?: boolean;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -359,7 +361,7 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 			const resolution = resolveTargetedAsyncRun(asyncDirRoot, options.runId, options.sessionId);
 			entries = resolution.kind === "exact"
 				? [resolution.id]
-				: resolution.kind === "scan"
+				: resolution.kind === "scan" && !options.exactRunId
 					? fs.readdirSync(asyncDirRoot).filter((entry) =>
 						(entry === options.runId || entry.startsWith(options.runId!))
 						&& resolveTargetedAsyncRun(asyncDirRoot, entry, options.sessionId).kind === "exact"
@@ -389,11 +391,16 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 	};
 	for (const entry of entries) {
 		const asyncDir = path.join(asyncDirRoot, entry);
+		if (options.exactRunId) {
+			const selected = readStatus(asyncDir);
+			if (selected?.runId !== entry || (options.sessionId !== undefined && selected.sessionId !== options.sessionId)) continue;
+		}
 		const reconciliation = options.reconcile === false
 			? undefined
 			: reconcileAsyncRun(asyncDir, { resultsDir: options.resultsDir, kill: options.kill, now: options.now });
 		const status = (reconciliation?.status ?? readStatus(asyncDir)) as (AsyncStatus & { cwd?: string }) | null;
 		if (!status) continue;
+		if (options.exactRunId && status.runId !== entry) continue;
 		// Filter before the nested-route lookup: the lookup builds an index over
 		// the nested-events directory, so deferring it for filtered-out runs keeps
 		// restoration at load from scanning that directory when no active runs
