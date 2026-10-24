@@ -8,6 +8,7 @@ export interface DrainableSource {
 export interface JsonlWriteStream {
 	write(chunk: string): boolean;
 	once(event: "drain", listener: () => void): JsonlWriteStream;
+	on(event: "error", listener: (error: Error) => void): JsonlWriteStream;
 	end(callback?: () => void): void;
 }
 
@@ -48,34 +49,61 @@ export function createJsonlWriter(
 
 	let backpressured = false;
 	let closed = false;
+	let failed = false;
+	let closePromise: Promise<void> | undefined;
+	let resolveClose: (() => void) | undefined;
+	const releaseBackpressure = () => {
+		if (!backpressured) return;
+		backpressured = false;
+		source.resume();
+	};
+	const fail = () => {
+		failed = true;
+		releaseBackpressure();
+		resolveClose?.();
+	};
+	// Artifact output is best effort; an asynchronous filesystem failure must
+	// not crash the runner or strand the child stdout waiting for drain.
+	stream.on("error", fail);
 	let bytesWritten = 0;
 	const maxBytes = deps.maxBytes ?? DEFAULT_MAX_JSONL_BYTES;
 
 	return {
 		writeLine(line: string) {
-			if (!stream || closed || !line.trim()) return;
+			if (!stream || closed || failed || !line.trim()) return;
 			const chunk = `${line}\n`;
 			const chunkBytes = Buffer.byteLength(chunk, "utf-8");
 			if (bytesWritten + chunkBytes > maxBytes) return;
 			try {
 				const ok = stream.write(chunk);
+				if (failed) return;
 				bytesWritten += chunkBytes;
 				if (!ok && !backpressured) {
 					backpressured = true;
 					source.pause();
 					stream.once("drain", () => {
-						backpressured = false;
-						if (!closed) source.resume();
+						releaseBackpressure();
 					});
 				}
-			} catch {}
+			} catch {
+				fail();
+			}
 		},
-		async close() {
-			if (!stream || closed) return;
+		close() {
+			if (closePromise) return closePromise;
 			closed = true;
+			releaseBackpressure();
+			if (!stream || failed) return Promise.resolve();
 			const current = stream;
-			stream = undefined;
-			await new Promise<void>((resolve) => current.end(() => resolve()));
+			closePromise = new Promise<void>((resolve) => {
+				resolveClose = resolve;
+				try {
+					current.end(resolve);
+				} catch {
+					fail();
+				}
+			});
+			return closePromise;
 		},
 	};
 }
