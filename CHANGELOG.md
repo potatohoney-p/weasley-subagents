@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Reject already-canceled foreground runs before preparing artifacts, clearing structured output, or spawning a child.
+
 ## [0.39.0] - 2026-08-02
 
 ### Added
