@@ -149,6 +149,12 @@ Common settings include:
 - `artifactDir`, `fleetView`, and `fleetViewPlacement`
 - `intercomBridge` for parent/child coordination
 
+Model spelling normalization resolves only a unique fuzzy match within the preferred
+provider. If multiple revisions or spellings match, the requested model string
+is passed unchanged to Pi instead of selecting the first registry entry. Exact
+registry matches still take precedence. This preserves the existing unresolved
+model behavior; it does not validate or constrain Pi's downstream model matching.
+
 Invalid safety-critical limits fail closed instead of silently becoming unbounded.
 
 ### Writer budget guidance
