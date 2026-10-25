@@ -1875,13 +1875,16 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.workflowGraph?.nodes?.[1]?.status, "completed");
 	});
 
-	it("async chains persist prototype-named outputs as own JSON entries", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("async chains persist prototype-named outputs as own JSON entries", { skip: !isAsyncAvailable?.() ? "jiti not available" : undefined }, async () => {
+		assert.ok(executeAsyncChain);
+		assert.ok(ASYNC_DIR);
 		const schema = {
 			type: "object",
 			required: ["value"],
 			properties: { value: { type: "string" } },
 		};
-		mockPi.onCall({ structuredOutput: { value: "Alpha structured" } });
+		const response = { structuredOutput: { value: "Alpha structured" }, output: "" };
+		mockPi.onCall(response);
 		mockPi.onCall({ output: "used named output" });
 		const id = `async-structured-chain-${Date.now().toString(36)}`;
 		const result = executeAsyncChain(id, {

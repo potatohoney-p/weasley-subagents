@@ -656,6 +656,7 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 	});
 
 	it("persists prototype-named sequential outputs as own entries", async () => {
+		assert.ok(executeChain);
 		mockPi.onCall({ output: "Context marker: CTX_123" });
 		mockPi.onCall({ output: "Done" });
 		const agents = [makeAgent("context"), makeAgent("writer")];
