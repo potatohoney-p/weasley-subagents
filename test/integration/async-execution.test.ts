@@ -1875,6 +1875,52 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.workflowGraph?.nodes?.[1]?.status, "completed");
 	});
 
+	it("async chains persist prototype-named outputs as own JSON entries", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const schema = {
+			type: "object",
+			required: ["value"],
+			properties: { value: { type: "string" } },
+		};
+		mockPi.onCall({ structuredOutput: { value: "Alpha structured" } });
+		mockPi.onCall({ output: "used named output" });
+		const id = `async-structured-chain-${Date.now().toString(36)}`;
+		const result = executeAsyncChain(id, {
+			chain: [
+				{
+					agent: "producer",
+					task: "Produce data",
+					phase: "Collect",
+					label: "Produce structured data",
+					as: "__proto__",
+					outputSchema: schema,
+				},
+				{ agent: "consumer", task: "Use {outputs.__proto__}", phase: "Use", label: "Consume data" },
+			],
+			agents: [makeAgent("producer"), makeAgent("consumer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-structured" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.ok(Object.hasOwn(payload.outputs ?? {}, "__proto__"));
+		assert.deepEqual(payload.results[0]?.structuredOutput, { value: "Alpha structured" });
+		assert.deepEqual(payload.outputs?.__proto__?.structured, { value: "Alpha structured" });
+		assert.match(readMockPiArgs(mockPi, 1).at(-1) ?? "", /Alpha structured/);
+		assert.equal(status.steps?.[0]?.label, "Produce structured data");
+		assert.equal(status.steps?.[0]?.phase, "Collect");
+		assert.equal(status.steps?.[0]?.outputName, "__proto__");
+		assert.equal(status.steps?.[0]?.structured, true);
+		assert.equal(payload.workflowGraph?.nodes?.[0]?.label, "Produce structured data");
+		assert.equal(payload.workflowGraph?.nodes?.[0]?.outputName, "__proto__");
+		assert.equal(payload.workflowGraph?.nodes?.[0]?.status, "completed");
+		assert.equal(payload.workflowGraph?.nodes?.[1]?.status, "completed");
+	});
+
 	it("async chains can start parallel, funnel into one step, then fan back out", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ matchArgIncludes: "Scout API", output: "Scout A async findings" });
 		mockPi.onCall({ matchArgIncludes: "Scout UI", output: "Scout B async findings" });

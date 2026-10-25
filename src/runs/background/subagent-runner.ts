@@ -1807,7 +1807,8 @@ async function runSubagent(
 		config;
 	const globalSemaphore = new Semaphore(config.globalConcurrencyLimit ?? DEFAULT_GLOBAL_CONCURRENCY_LIMIT);
 	let previousOutput = "";
-	const outputs: ChainOutputMap = {};
+	// Named outputs may use any validated identifier, including __proto__.
+	const outputs: ChainOutputMap = Object.create(null);
 	const results: StepResult[] = [];
 	const overallStartTime = Date.now();
 	const shareEnabled = config.share === true;

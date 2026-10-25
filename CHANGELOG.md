@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Preserve prototype-named chain outputs (such as `__proto__`) through foreground and background result serialization, and reject inherited properties as output references. In-memory output dictionaries now have a null prototype; use `Object.hasOwn` or `Object.keys` rather than inherited object methods. The JSON output shape is unchanged.
+
 ## [0.39.0] - 2026-08-02
 
 ### Added

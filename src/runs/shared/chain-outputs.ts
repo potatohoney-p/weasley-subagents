@@ -89,7 +89,7 @@ export function resolveOutputReferences(template: string, outputs: ChainOutputMa
 		if (!SAFE_OUTPUT_NAME_PATTERN.test(name)) {
 			throw new ChainOutputValidationError(`Invalid chain output reference '${rawReference}'. Use {outputs.name} with /^[A-Za-z_][A-Za-z0-9_]*$/ names.`);
 		}
-		const entry = outputs[name];
+		const entry = Object.hasOwn(outputs, name) ? outputs[name] : undefined;
 		if (!entry) throw new ChainOutputValidationError(`Unknown chain output reference '${rawReference}'.`);
 		return entry.text;
 	});
