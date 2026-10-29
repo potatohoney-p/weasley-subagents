@@ -29,6 +29,8 @@ interface ReconcileAsyncRunOptions {
 	startedRun?: StartedRunMetadata;
 	missingStatusGraceMs?: number;
 	staleAlivePidMs?: number;
+	/** Restrict scoped reconciliation using the freshly read status, not a caller cache. */
+	expectedIdentity?: { runId: string; sessionId?: string };
 }
 
 interface ReconcileAsyncRunResult {
@@ -364,6 +366,11 @@ export function checkPidLiveness(pid: number, kill: KillFn = process.kill): PidL
 export function reconcileAsyncRun(asyncDir: string, options: ReconcileAsyncRunOptions = {}): ReconcileAsyncRunResult {
 	const now = options.now?.() ?? Date.now();
 	const status = readStatusFile(asyncDir);
+	const expected = options.expectedIdentity;
+	if (expected && (!status || status.runId !== expected.runId
+		|| (expected.sessionId !== undefined && status.sessionId !== expected.sessionId))) {
+		return { status: null, repaired: false };
+	}
 	const startedStatus = !status && options.startedRun ? buildStartedStatus(asyncDir, options.startedRun, now) : undefined;
 	const effectiveStatus = status ?? startedStatus;
 	if (!effectiveStatus) return { status: null, repaired: false };
