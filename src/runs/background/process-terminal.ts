@@ -188,7 +188,9 @@ function stepProcessTerminalProof(
 	if (state === "observed") {
 		// Child proofs must remain independently valid when status readers sanitize
 		// them. Retain the verified runner close, but never sibling writer records.
-		const runner = proof.instances?.find((instance) => instance.kind === "runner" && instance.processInstanceId === proof.runnerProcessInstanceId);
+		const runner = "instances" in proof
+			? proof.instances?.find((instance) => instance.kind === "runner" && instance.processInstanceId === proof.runnerProcessInstanceId)
+			: undefined;
 		return { ...base, state, observedAt: proof.state === "observed" ? proof.observedAt : Date.now(), instances: runner ? [runner, ...records] : records };
 	}
 	if (state === "unknown") {
