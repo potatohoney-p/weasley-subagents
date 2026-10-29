@@ -352,8 +352,14 @@ const SubagentWaitParamsSchema = Type.Object({
 	id: Type.Optional(Type.String({
 		description: "Async run or remembered detached foreground run id/prefix to wait for one specific run. Omit to wait across every active async run started in this session.",
 	})),
+	ids: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), {
+		minItems: 1,
+		maxItems: 100,
+		uniqueItems: true,
+		description: "Select 1–100 unique exact async run IDs owned by this session. Mutually exclusive with id. Wait for the first selected initially active run (or all with all:true); ignore unrelated work and providers. Already-terminal selected runs do not extend the wait. Prefixes and remembered foreground runs are not supported here; use id for one foreground run.",
+	})),
 	all: Type.Optional(Type.Boolean({
-		description: "Wait for ALL active runs to finish. Default false: return as soon as the first run finishes, so a fleet manager can spawn a replacement and wait again. Ignored when id targets a single run.",
+		description: "Wait for ALL initially active runs in the selected ids set, or the session when ids is omitted. Default false: return as soon as the first run finishes, so a fleet manager can spawn a replacement and wait again. Ignored when id targets a single run.",
 	})),
 	timeoutMs: Type.Optional(Type.Integer({
 		minimum: 1,

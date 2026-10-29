@@ -217,7 +217,7 @@ export function validateDynamicStepShape(step: DynamicParallelStep, stepIndex: n
 export function resolveDynamicFanoutItems(step: DynamicParallelStep, outputs: ChainOutputMap, stepIndex: number, config: DynamicFanoutConfig = {}): DynamicMaterializedItem[] {
 	validateDynamicStepShape(step, stepIndex, config);
 	const sourceName = step.expand.from.output;
-	const source = outputs[sourceName];
+	const source = Object.hasOwn(outputs, sourceName) ? outputs[sourceName] : undefined;
 	if (!source) throw new DynamicFanoutError(`Dynamic chain step ${stepIndex + 1} references unknown output '${sourceName}'.`);
 	if (source.structured === undefined) throw new DynamicFanoutError(`Dynamic chain step ${stepIndex + 1} requires structured output '${sourceName}'.`);
 	const value = resolveJsonPointer(source.structured, step.expand.from.path, `Dynamic chain step ${stepIndex + 1} expand.from.path`);

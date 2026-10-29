@@ -655,6 +655,31 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(result.details.workflowGraph?.nodes[0]?.outputName, "contextOutput");
 	});
 
+	it("persists prototype-named sequential outputs as own entries", async () => {
+		assert.ok(executeChain);
+		mockPi.onCall({ output: "Context marker: CTX_123" });
+		mockPi.onCall({ output: "Done" });
+		const agents = [makeAgent("context"), makeAgent("writer")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "context", task: "Gather context", as: "__proto__" },
+					{ agent: "writer", task: "Use {outputs.__proto__}" },
+				],
+				agents,
+			),
+		);
+
+		assert.ok(!result.isError);
+		assert.ok(Object.hasOwn(result.details.outputs ?? {}, "__proto__"));
+		const persisted = JSON.parse(JSON.stringify(result.details.outputs));
+		assert.ok(Object.hasOwn(persisted, "__proto__"));
+		assert.match(persisted.__proto__.text, /CTX_123/);
+		assert.match(readCallArgs(1).at(-1) ?? "", /CTX_123/);
+		assert.equal(result.details.workflowGraph?.nodes[0]?.outputName, "__proto__");
+	});
+
 	it("expands structured named output into dynamic parallel children and collects results", async () => {
 		mockPi.onCall({
 			output: "targets",

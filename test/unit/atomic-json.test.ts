@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { createAtomicJsonWriter } from "../../src/shared/atomic-json.ts";
+import { createAtomicJsonWriter, writeAtomicJsonIfAbsent } from "../../src/shared/atomic-json.ts";
 
 class FakeFs {
 	files = new Map<string, string>();
@@ -58,6 +60,55 @@ function createWriter(fakeFs: FakeFs, waits: number[]) {
 }
 
 describe("writeAtomicJson", () => {
+	it("publishes complete JSON once without replacing an existing result", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-json-publish-"));
+		try {
+			const target = path.join(root, "result.json");
+			assert.equal(writeAtomicJsonIfAbsent(target, { success: true }), true);
+			assert.equal(writeAtomicJsonIfAbsent(target, { success: false }), false);
+			assert.deepEqual(JSON.parse(fs.readFileSync(target, "utf-8")), { success: true });
+			assert.deepEqual(fs.readdirSync(root), ["result.json"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not replace a result that wins at the atomic publication boundary", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-json-race-"));
+		const target = path.join(root, "result.json");
+		try {
+			const writer = createAtomicJsonWriter({
+				replaceExisting: false,
+				fs: {
+					...fs,
+					linkSync(source, destination) {
+						fs.writeFileSync(target, JSON.stringify({ summary: "real result" }));
+						fs.linkSync(source, destination);
+					},
+				},
+			});
+			assert.equal(writer(target, { summary: "synthetic failure" }), false);
+			assert.deepEqual(JSON.parse(fs.readFileSync(target, "utf-8")), { summary: "real result" });
+			assert.deepEqual(fs.readdirSync(root), ["result.json"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("fails without publishing partial JSON when exclusive publication is unsupported", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-json-unsupported-"));
+		try {
+			const writer = createAtomicJsonWriter({
+				replaceExisting: false,
+				fs: { ...fs, linkSync() { throw Object.assign(new Error("unsupported"), { code: "ENOTSUP" }); } },
+			});
+			assert.throws(() => writer(path.join(root, "result.json"), { success: false }), /unsupported/);
+			assert.deepEqual(fs.readdirSync(root), []);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("retries transient rename failures before replacing the target", () => {
 		const fakeFs = new FakeFs();
 		fakeFs.failRenameCodes = ["EPERM", "EBUSY"];

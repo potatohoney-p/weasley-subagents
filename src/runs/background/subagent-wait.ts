@@ -73,8 +73,10 @@ const DEFAULT_POLL_INTERVAL_MS = 1000;
 export interface SubagentWaitParams {
 	/** Optional run id/prefix to wait for. When omitted, waits across every active run in this session. */
 	id?: string;
+	/** Exact async run IDs to select (1–100 unique IDs). Mutually exclusive with id. */
+	ids?: string[];
 	/**
-	 * When true, block until EVERY active run in this session (or matching `id`)
+	 * When true, block until EVERY initially active selected run (or session run)
 	 * is terminal. Default false: return as soon as the first run finishes, so a
 	 * fleet manager can spawn a replacement and wait again. Ignored when `id`
 	 * targets a single run.
@@ -153,11 +155,11 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
  * turn aborts). Returns when the first of those happens. With no bus this is a
  * plain sleep, so the poll interval alone drives progress.
  */
-function waitForWake(ms: number, signal: AbortSignal | undefined, deps: SubagentWaitDeps): Promise<void> {
+function waitForWake(ms: number, signal: AbortSignal | undefined, deps: SubagentWaitDeps, includeProviders = true): Promise<void> {
 	const sleep = deps.sleep ?? defaultSleep;
 	const events = deps.events;
 	if (!events) return sleep(ms, signal);
-	const providerChannels = deps.backgroundWork?.wakeChannels() ?? listBackgroundWorkWakeChannels();
+	const providerChannels = includeProviders ? deps.backgroundWork?.wakeChannels() ?? listBackgroundWorkWakeChannels() : [];
 	return new Promise((resolve, reject) => {
 		let settled = false;
 		const unsubs: Array<() => void> = [];
@@ -251,8 +253,57 @@ function backgroundWorkForSession(deps: SubagentWaitDeps, nowMs: number): Backgr
 	return deps.backgroundWork?.snapshot(sessionId, nowMs) ?? snapshotBackgroundWork(sessionId, nowMs);
 }
 
+function validateSelectedIds(params: SubagentWaitParams): void {
+	if (params.ids === undefined) return;
+	if (params.id !== undefined) throw new Error("subagent_wait accepts id or ids, not both id and ids.");
+	if (!Array.isArray(params.ids) || params.ids.length < 1 || params.ids.length > 100) {
+		throw new Error("subagent_wait ids must contain 1–100 unique exact async run IDs.");
+	}
+	const seen = new Set<string>();
+	for (const id of params.ids) {
+		if (typeof id !== "string" || !id || id.trim() !== id || id.length > 256
+			|| id === "." || id === ".." || /[\\/\u0000-\u001f\u007f]/.test(id)) {
+			throw new Error("subagent_wait ids must contain non-empty exact run IDs (at most 256 characters), not paths or control characters.");
+		}
+		if (seen.has(id)) throw new Error(`subagent_wait ids contains duplicate ID "${id}".`);
+		seen.add(id);
+	}
+}
+
+/** Read exact selected identities in any state; absence is not proof of completion. */
+function selectedRunsForSession(ids: string[], deps: SubagentWaitDeps): AsyncRunSummary[] {
+	const sessionId = deps.state.currentSessionId;
+	if (!sessionId) throw new Error("subagent_wait requires an active session identity to scope selected runs safely.");
+	const assertSession = () => {
+		if (deps.state.currentSessionId !== sessionId) {
+			throw new Error("Wait stopped because the active session changed; selected run completion cannot be confirmed.");
+		}
+	};
+	return ids.map((id) => {
+		assertSession();
+		const runs = listAsyncRuns(deps.asyncDirRoot ?? ASYNC_DIR, {
+			sessionId,
+			resultsDir: deps.resultsDir ?? RESULTS_DIR,
+			kill: deps.kill,
+			now: deps.now,
+			runId: id,
+			exactRunId: true,
+		});
+		assertSession();
+		const run = runs.find((candidate) => candidate.id === id);
+		if (!run) {
+			throw new Error(`Selected async run "${id}" was not found with its exact identity in this session; completion cannot be confirmed. ids accepts exact async IDs only, not prefixes, provider items, or remembered foreground runs.`);
+		}
+		if (![...ACTIVE_STATES, "complete", "failed", "paused", "stopped", "rejected"].includes(run.state)) {
+			throw new Error(`Selected async run "${id}" has an invalid lifecycle state; completion cannot be confirmed.`);
+		}
+		return run;
+	});
+}
+
 /** Queued/running runs from this session, including runs that need attention. */
 function activeRunsForSession(params: SubagentWaitParams, deps: SubagentWaitDeps): AsyncRunSummary[] {
+	if (params.ids) return selectedRunsForSession(params.ids, deps).filter((run) => ACTIVE_STATES.includes(run.state));
 	const asyncDirRoot = deps.asyncDirRoot ?? ASYNC_DIR;
 	const resultsDir = deps.resultsDir ?? RESULTS_DIR;
 	const runs = listAsyncRuns(asyncDirRoot, {
@@ -273,6 +324,7 @@ function attentionRunsForSession(params: SubagentWaitParams, deps: SubagentWaitD
 
 /** All runs (any state) for this session, for the final summary. */
 function allRunsForSession(params: SubagentWaitParams, deps: SubagentWaitDeps): AsyncRunSummary[] {
+	if (params.ids) return selectedRunsForSession(params.ids, deps);
 	const asyncDirRoot = deps.asyncDirRoot ?? ASYNC_DIR;
 	const resultsDir = deps.resultsDir ?? RESULTS_DIR;
 	const runs = listAsyncRuns(asyncDirRoot, {
@@ -460,6 +512,14 @@ export async function waitForSubagents(
 	if (!deps.state.currentSessionId) {
 		return result("subagent_wait requires an active session identity to scope background work safely.", true);
 	}
+	try {
+		validateSelectedIds(params);
+	} catch (error) {
+		return result(error instanceof Error ? error.message : String(error), true);
+	}
+	const sessionId = deps.state.currentSessionId;
+	const sessionChanged = () => Boolean(params.ids && deps.state.currentSessionId !== sessionId);
+	const sessionChangedResult = () => result("Wait stopped because the active session changed; selected run completion cannot be confirmed. Return to the originating session to inspect or wait for these runs.", true);
 
 	const now = deps.now ?? Date.now;
 	const pollIntervalMs = Math.max(MIN_POLL_INTERVAL_MS, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
@@ -473,7 +533,7 @@ export async function waitForSubagents(
 	try {
 		active = activeRunsForSession(params, deps);
 		foreground = activeDetachedForegroundRuns(params, deps);
-		providerSnapshot = params.id ? { providers: [], items: [] } : backgroundWorkForSession(deps, startedAt);
+		providerSnapshot = params.id || params.ids ? { providers: [], items: [] } : backgroundWorkForSession(deps, startedAt);
 	} catch (error) {
 		return result(error instanceof Error ? error.message : String(error), true);
 	}
@@ -496,12 +556,15 @@ export async function waitForSubagents(
 	}
 
 	let providerActive = providerSnapshot.items;
+	if (sessionChanged()) return sessionChangedResult();
 	if (active.length === 0 && providerActive.length === 0) {
 		return result(params.id
 			? `No active run matched "${params.id}". Nothing to wait for.`
+			: params.ids ? "No active selected async runs. All selected runs are already terminal; nothing to wait for."
 			: "No active async runs or registered provider work in this session. Nothing to wait for.");
 	}
-	const waitParams = params.id ? { ...params, id: active[0]!.id } : params;
+	const waitParams = params.id ? { ...params, id: active[0]!.id }
+		: params.ids ? { ...params, ids: active.map((run) => run.id) } : params;
 	const initialAsyncIds = new Set(active.map((run) => run.id));
 	const initialProviderIds = new Set(providerActive.map(backgroundWorkIdentity));
 	const initialProviderNames = new Set(providerActive.map((item) => item.provider));
@@ -538,10 +601,11 @@ export async function waitForSubagents(
 			);
 		}
 		try {
-			await waitForWake(pollIntervalMs, signal, deps);
+			await waitForWake(pollIntervalMs, signal, deps, !params.ids);
+			if (sessionChanged()) return sessionChangedResult();
 			active = activeRunsForSession(waitParams, deps);
 			attention = attentionRunsForSession(waitParams, deps, initialAsyncIds);
-			providerSnapshot = params.id ? providerSnapshot : backgroundWorkForSession(deps, now());
+			providerSnapshot = params.id || params.ids ? providerSnapshot : backgroundWorkForSession(deps, now());
 			for (const provider of initialProviderNames) {
 				if (!providerSnapshot.providers.includes(provider)) {
 					return result(`Background-work provider '${provider}' disappeared while subagent_wait was tracking its active work; completion cannot be confirmed.`, true);
@@ -556,17 +620,21 @@ export async function waitForSubagents(
 	let terminalSummary: string;
 	let finishedAsyncCount: number;
 	let failedAsyncCount: number;
+	let terminalRuns: AsyncRunSummary[] = [];
 	const activeProviderIds = new Set(providerActive.map(backgroundWorkIdentity));
 	const providerFinishedCount = [...initialProviderIds].filter((id) => !activeProviderIds.has(id)).length;
 	try {
+		if (sessionChanged()) return sessionChangedResult();
 		const allNow = allRunsForSession(waitParams, deps);
 		const terminal = allNow.filter((run) => !ACTIVE_STATES.includes(run.state) && initialAsyncIds.has(run.id));
+		terminalRuns = terminal;
 		finishedAsyncCount = terminal.length;
 		failedAsyncCount = terminal.filter((run) => run.state === "failed").length;
 		terminalSummary = summarizeTerminalRuns(terminal, providerFinishedCount);
 	} catch (error) {
 		return result(error instanceof Error ? error.message : String(error), true);
 	}
+	if (sessionChanged()) return sessionChangedResult();
 
 	const relevantAttention = attention.filter((run) => initialAsyncIds.has(run.id));
 	const supervisorAttentionHint = relevantAttention.some(hasSupervisorTool)
@@ -578,13 +646,15 @@ export async function waitForSubagents(
 	const stillRunning = active.filter((run) => initialAsyncIds.has(run.id)).length
 		+ providerActive.filter((item) => initialProviderIds.has(backgroundWorkIdentity(item))).length;
 	const elapsed = formatDuration(now() - startedAt);
-	const outcome = terminalSummary ? ` Outcome: ${terminalSummary}.` : "";
+	const selectedOutcomes = params.ids && terminalRuns.length > 0
+		? ` Selected outcomes: ${terminalRuns.map((run) => `${run.id} (${run.state})`).join(", ")}.` : "";
+	const outcome = (terminalSummary ? ` Outcome: ${terminalSummary}.` : "") + selectedOutcomes;
 
 	if (waitForAll) {
 		const scope = params.id
 			? `run "${params.id}"`
 			: initialProviderIds.size === 0
-				? `${initialAsyncIds.size} async run(s)`
+				? `${initialAsyncIds.size} ${params.ids ? "selected " : ""}async run(s)`
 				: `${initialAsyncIds.size} async run(s) and ${initialProviderIds.size} provider item(s)`;
 		const status = relevantAttention.length > 0 ? "attention required" : "done";
 		return result(
@@ -594,12 +664,12 @@ export async function waitForSubagents(
 	}
 
 	const finishedCount = finishedAsyncCount + providerFinishedCount;
-	const subject = initialProviderIds.size === 0 ? "run(s)" : "item(s)";
+	const subject = initialProviderIds.size === 0 ? `${params.ids ? "selected " : ""}run(s)` : "item(s)";
 	const remainder = stillRunning > 0
 		? ` ${stillRunning} ${subject} still in flight — call subagent_wait again to catch the next one.`
 		: relevantAttention.length > 0
 			? " No other work is waitable until attention is handled."
-			: initialProviderIds.size === 0 ? " No runs remain in flight." : " No work remains in flight.";
+			: initialProviderIds.size === 0 ? ` No ${params.ids ? "selected " : ""}runs remain in flight.` : " No work remains in flight.";
 	const progress = relevantAttention.length > 0 && finishedCount === 0
 		? `${relevantAttention.length} of ${initialCount} ${subject} need attention`
 		: `${finishedCount} of ${initialCount} ${subject} finished`;

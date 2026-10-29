@@ -20,7 +20,7 @@ import { waitForSubagents } from "../../src/runs/background/subagent-wait.ts";
 import { writeAtomicJson } from "../../src/shared/atomic-json.ts";
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
 import { MAX_CHILD_PENDING_LINE_BYTES, MAX_CHILD_STDERR_BYTES } from "../../src/runs/shared/child-protocol.ts";
-import { SUBAGENT_ASYNC_STARTED_EVENT, SUBAGENT_LIFECYCLE_ARTIFACT_VERSION } from "../../src/shared/types.ts";
+import { SUBAGENT_ASYNC_STARTED_EVENT, SUBAGENT_LIFECYCLE_ARTIFACT_VERSION, type AcceptanceVerifyResult } from "../../src/shared/types.ts";
 import { registerSubagentCapabilityCeiling } from "../../src/api/capability-ceiling.ts";
 import { resolveSubagentLaunchContract } from "../../src/api/preflight.ts";
 import { discoverAgents } from "../../src/agents/agents.ts";
@@ -80,7 +80,7 @@ interface AsyncResultPayload {
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 	usageBudget?: UsageBudgetState;
 	checkpoint?: { name?: string; status?: string };
-	results: Array<{ agent?: string; launchContractDigest?: string; launchResolvedExtensions?: LaunchResolvedExtensions; runtimeAcknowledgedExtensions?: RuntimeAcknowledgedExtensions; output?: string; success?: boolean; error?: string; protocolError?: { code?: string; stream?: string; limitBytes?: number; observedBytes?: number }; timedOut?: boolean; stopped?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; terminationDeferredAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; agentContract?: { version: 1 }; execution?: { status?: string; success?: boolean; exitCode?: number }; effects?: { fileMutation?: { status?: string; expected?: boolean; attempted?: boolean } }; intercomTarget?: string; acceptance?: { status?: string; effectiveAcceptance?: { level?: string }; childReport?: unknown; runtimeChecks?: Array<{ id?: string; status?: string; message?: string }> }; artifactPaths?: { outputPath?: string; inputPath?: string; metadataPath?: string }; capabilityCeiling?: { version?: number; allowedTools?: string[]; denyExtensions?: boolean; sources?: string[] }; capabilityAudit?: { effectiveTools?: string[]; removedTools?: string[]; extensionsDenied?: boolean } }>;
+	results: Array<{ agent?: string; launchContractDigest?: string; launchResolvedExtensions?: LaunchResolvedExtensions; runtimeAcknowledgedExtensions?: RuntimeAcknowledgedExtensions; output?: string; success?: boolean; error?: string; protocolError?: { code?: string; stream?: string; limitBytes?: number; observedBytes?: number }; timedOut?: boolean; stopped?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; terminationDeferredAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; agentContract?: { version: 1 }; execution?: { status?: string; success?: boolean; exitCode?: number }; effects?: { fileMutation?: { status?: string; expected?: boolean; attempted?: boolean } }; intercomTarget?: string; acceptance?: { status?: string; verifyRuns?: AcceptanceVerifyResult[]; effectiveAcceptance?: { level?: string }; childReport?: unknown; runtimeChecks?: Array<{ id?: string; status?: string; message?: string }> }; artifactPaths?: { outputPath?: string; inputPath?: string; metadataPath?: string }; capabilityCeiling?: { version?: number; allowedTools?: string[]; denyExtensions?: boolean; sources?: string[] }; capabilityAudit?: { effectiveTools?: string[]; removedTools?: string[]; extensionsDenied?: boolean } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; acceptanceStatus?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; acceptanceStatus?: string; error?: string }> }> };
 	parallelHandoff?: { version?: number; path?: string; groupCount?: number; childCount?: number; changedPatches?: number; cleanupState?: string };
@@ -1875,6 +1875,55 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.workflowGraph?.nodes?.[1]?.status, "completed");
 	});
 
+	it("async chains persist prototype-named outputs as own JSON entries", { skip: !isAsyncAvailable?.() ? "jiti not available" : undefined }, async () => {
+		assert.ok(executeAsyncChain);
+		assert.ok(ASYNC_DIR);
+		const schema = {
+			type: "object",
+			required: ["value"],
+			properties: { value: { type: "string" } },
+		};
+		const response = { structuredOutput: { value: "Alpha structured" }, output: "" };
+		mockPi.onCall(response);
+		mockPi.onCall({ output: "used named output" });
+		const id = `async-structured-chain-${Date.now().toString(36)}`;
+		const result = executeAsyncChain(id, {
+			chain: [
+				{
+					agent: "producer",
+					task: "Produce data",
+					phase: "Collect",
+					label: "Produce structured data",
+					as: "__proto__",
+					outputSchema: schema,
+				},
+				{ agent: "consumer", task: "Use {outputs.__proto__}", phase: "Use", label: "Consume data" },
+			],
+			agents: [makeAgent("producer"), makeAgent("consumer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-structured" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.ok(Object.hasOwn(payload.outputs ?? {}, "__proto__"));
+		assert.deepEqual(payload.results[0]?.structuredOutput, { value: "Alpha structured" });
+		assert.deepEqual(payload.outputs?.__proto__?.structured, { value: "Alpha structured" });
+		assert.match(readMockPiArgs(mockPi, 1).at(-1) ?? "", /Alpha structured/);
+		assert.equal(status.steps?.[0]?.label, "Produce structured data");
+		assert.equal(status.steps?.[0]?.phase, "Collect");
+		assert.equal(status.steps?.[0]?.outputName, "__proto__");
+		assert.equal(status.steps?.[0]?.structured, true);
+		assert.equal(payload.workflowGraph?.nodes?.[0]?.label, "Produce structured data");
+		assert.equal(payload.workflowGraph?.nodes?.[0]?.outputName, "__proto__");
+		assert.equal(payload.workflowGraph?.nodes?.[0]?.status, "completed");
+		assert.equal(payload.workflowGraph?.nodes?.[1]?.status, "completed");
+	});
+
 	it("async chains can start parallel, funnel into one step, then fan back out", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ matchArgIncludes: "Scout API", output: "Scout A async findings" });
 		mockPi.onCall({ matchArgIncludes: "Scout UI", output: "Scout B async findings" });
@@ -2281,7 +2330,11 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.state, "failed");
 		assert.equal(payload.timedOut, true);
 		assert.equal(payload.results.at(-1)?.timedOut, true);
-		assert.equal(payload.results.at(-1)?.acceptance, undefined);
+		const interruptedAcceptance = payload.results.at(-1)?.acceptance;
+		assert.equal(interruptedAcceptance?.status, "rejected");
+		assert.equal(interruptedAcceptance?.verifyRuns?.[0]?.id, "slow");
+		assert.equal(interruptedAcceptance?.verifyRuns?.[0]?.status, "timed-out");
+		assert.equal(interruptedAcceptance?.verifyRuns?.[0]?.termination?.method, "posix-process-group");
 		assert.equal(dynamicNode?.status, "failed");
 		assert.match(dynamicNode?.error ?? "", /Subagent timed out after 1000ms\./);
 		assert.notEqual(dynamicNode?.acceptanceStatus, "verified");

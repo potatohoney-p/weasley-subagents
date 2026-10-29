@@ -52,9 +52,9 @@
   ],
   "scripts": {
     "test": "npm run test:unit",
-    "test:unit": "node --experimental-strip-types --test-force-exit --test-concurrency=2 --test test/unit/*.test.ts",
-    "test:integration": "node --experimental-strip-types --test-force-exit --test-concurrency=2 --import ./test/support/register-loader.mjs --test test/integration/*.test.ts",
-    "test:e2e": "node --experimental-strip-types --test-force-exit --test-concurrency=1 --import ./test/support/register-loader.mjs --test test/e2e/*.test.ts",
+    "test:unit": "node test/support/check-runner-reporting.mjs && node --experimental-strip-types --test-concurrency=2 --test-timeout=60000 --test test/unit/*.test.ts",
+    "test:integration": "node --experimental-strip-types --test-concurrency=2 --test-timeout=120000 --import ./test/support/register-loader.mjs --test test/integration/*.test.ts",
+    "test:e2e": "node --experimental-strip-types --test-concurrency=1 --test-timeout=120000 --import ./test/support/register-loader.mjs --test test/e2e/*.test.ts",
     "test:all": "npm run test:unit && npm run test:integration && npm run test:e2e",
     "typecheck": "tsc --noEmit",
     "pack:check": "npm pack --dry-run --json"

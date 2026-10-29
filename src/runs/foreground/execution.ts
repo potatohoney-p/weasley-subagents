@@ -473,6 +473,7 @@ async function runSingleAttempt(
 		let turnBudgetTerminationTimer: NodeJS.Timeout | undefined;
 		let turnBudgetHardKillTimer: NodeJS.Timeout | undefined;
 		let protocolHardKillTimer: NodeJS.Timeout | undefined;
+		let abortHardKillTimer: NodeJS.Timeout | undefined;
 		const clearTurnBudgetTimers = () => {
 			if (turnBudgetTerminationTimer) {
 				clearTimeout(turnBudgetTerminationTimer);
@@ -642,6 +643,10 @@ async function runSingleAttempt(
 			clearStdioGuard();
 			clearTimeoutTimers();
 			clearTurnBudgetTimers();
+			if (abortHardKillTimer) {
+				clearTimeout(abortHardKillTimer);
+				abortHardKillTimer = undefined;
+			}
 			if (protocolHardKillTimer) {
 				clearTimeout(protocolHardKillTimer);
 				protocolHardKillTimer = undefined;
@@ -1103,9 +1108,16 @@ async function runSingleAttempt(
 
 		if (options.signal) {
 			const kill = () => {
-				if (processClosed || lifecycleFinished) return;
-				proc.kill("SIGTERM");
-				setTimeout(() => !proc.killed && proc.kill("SIGKILL"), 3000);
+				if (childExited || processClosed || lifecycleFinished) return;
+				trySignalChild(proc, "SIGTERM");
+				if (childExited || processClosed || lifecycleFinished) return;
+				abortHardKillTimer = setTimeout(() => {
+					// ChildProcess.killed only records successful signal delivery, not
+					// exit. A child may handle SIGTERM and keep running indefinitely.
+					if (childExited || processClosed || lifecycleFinished) return;
+					trySignalChild(proc, "SIGKILL");
+				}, HARD_KILL_MS);
+				abortHardKillTimer.unref?.();
 			};
 			if (options.signal.aborted) kill();
 			else {
@@ -1689,6 +1701,25 @@ export async function runSync(
 	task: string,
 	options: RunSyncOptions,
 ): Promise<SingleResult> {
+	// Admission must precede launch preparation: even a canceled attempt would
+	// otherwise clear structured output and create artifacts before signaling a child.
+	if (options.signal?.aborted) {
+		const error = "Subagent run cancelled before launch.";
+		const result = withRunContext({
+			agent: agentName,
+			task,
+			exitCode: 1,
+			messages: [],
+			usage: emptyUsage(),
+			error,
+			finalOutput: error,
+			progressSummary: { toolCount: 0, tokens: 0, durationMs: 0 },
+			...(isAgentContractV1(options.agentContract) ? { agentContract: { version: 1 as const } } : {}),
+		} satisfies SingleResult, options.context);
+		if (isAgentContractV1(options.agentContract)) attachContractProjections(result);
+		return result;
+	}
+
 	// Capture the strict contract before consumer-owned objects can be mutated
 	// after a detached receipt is published.
 	const strictContract = isAgentContractV1(options.agentContract);

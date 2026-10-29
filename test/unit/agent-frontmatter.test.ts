@@ -751,6 +751,7 @@ Agent prompt
 
 	it("prunes repo internals and nested project roots from broad package discovery", () => withTempHome(() => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "weasley-subagents-broad-package-prune-"));
+		fs.mkdirSync(path.join(dir, ".pi"));
 		tempDirs.push(dir);
 		writeJson(path.join(dir, "package.json"), {
 			name: "repo-root-workflow",

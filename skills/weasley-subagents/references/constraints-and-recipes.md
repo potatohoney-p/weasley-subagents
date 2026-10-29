@@ -33,7 +33,10 @@ In an interactive chat, do not call `subagent_wait()` merely to wait after launc
 - `subagent_wait()` — return when the next initially active async run or registered provider item finishes, or a subagent needs attention.
 - `subagent_wait({ all: true })` — block until every async run and provider item active at call time finishes, or a subagent needs attention.
 - `subagent_wait({ id: "..." })` — block on one async or remembered detached foreground run (id or prefix). Provider items are not selected through this parameter.
+- `subagent_wait({ ids: ["run-a", "run-b"], all: true })` — join only the selected exact async run IDs; omit `all` for the first selected completion or attention. Other runs and provider work are excluded.
 - `subagent_wait({ timeoutMs })` — cap the block; active work keeps running if it elapses.
+
+`ids` accepts 1–100 unique exact async IDs owned by the current session and cannot be combined with `id`. Selected runs already terminal at call time are valid but excluded from the wait snapshot: `[alreadyDone, stillRunning]` still waits for `stillRunning`, even without `all`. Unknown IDs, lost lifecycle state, or a session switch return an error, not successful completion. For a remembered detached foreground run or a prefix, use the existing single `id` form.
 
 Providers are discovered through the versioned `weasley-subagents/background-work` registry and must return stable item IDs with exact owning session IDs. Child agents receive no provider automatically: keep `subagent_wait` in the child `tools` allowlist and load provider extensions through `extensions` or `subagentOnlyExtensions`.
 
