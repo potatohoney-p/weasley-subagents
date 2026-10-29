@@ -397,7 +397,13 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 		}
 		const reconciliation = options.reconcile === false
 			? undefined
-			: reconcileAsyncRun(asyncDir, { resultsDir: options.resultsDir, kill: options.kill, now: options.now });
+			: reconcileAsyncRun(asyncDir, {
+				resultsDir: options.resultsDir, kill: options.kill, now: options.now,
+				...(options.exactRunId ? { expectedIdentity: { runId: entry, sessionId: options.sessionId } } : {}),
+			});
+		// A fresh scoped read may reject identity despite a stale cached precheck.
+		// Do not fall back to that cached status after reconciliation fails closed.
+		if (options.exactRunId && reconciliation?.status === null) continue;
 		const status = (reconciliation?.status ?? readStatus(asyncDir)) as (AsyncStatus & { cwd?: string }) | null;
 		if (!status) continue;
 		if (options.exactRunId && status.runId !== entry) continue;

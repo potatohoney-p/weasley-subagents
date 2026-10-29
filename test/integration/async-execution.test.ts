@@ -2296,11 +2296,25 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["rejected", "rejected"]);
 	});
 
-	it("cancels dynamic fanout aggregate acceptance when the run times out", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
-		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
+	it("cancels active dynamic fanout aggregate acceptance on timeout delivery", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async (t) => {
+		mockPi.onCall({ delay: 1_500, output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
 		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
 		const id = `async-dynamic-acceptance-timeout-${Date.now().toString(36)}`;
-		const startedAt = Date.now();
+		const readyPath = path.join(tempDir, "aggregate-verify-ready");
+		const finishedPath = path.join(tempDir, "aggregate-verify-finished");
+		const verifierPath = path.join(tempDir, "aggregate-verifier.cjs");
+		fs.writeFileSync(verifierPath, `
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");
+setTimeout(() => fs.writeFileSync(${JSON.stringify(finishedPath)}, "finished naturally"), 60_000);
+`);
+		const asyncDir = path.join(ASYNC_DIR, id);
+		t.after(async () => {
+			if (!fs.existsSync(path.join(RESULTS_DIR, `${id}.json`))) {
+				deliverStopRequest({ asyncDir, source: "test-cleanup" });
+				await waitForAsyncResultFile(id, 10_000);
+			}
+		});
 		executeAsyncChain(id, {
 			chain: [
 				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
@@ -2310,7 +2324,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 					collect: { as: "reviews" },
 					acceptance: {
 						level: "verified",
-						verify: [{ id: "slow", command: `${process.execPath} -e "setTimeout(()=>process.exit(0), 5000)"`, timeoutMs: 10_000 }],
+						verify: [{ id: "slow", command: `"${process.execPath}" "${verifierPath}"`, timeoutMs: 90_000 }],
 					},
 				},
 			],
@@ -2319,9 +2333,20 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
 			shareEnabled: false,
 			maxSubagentDepth: 2,
-			timeoutMs: 1_000,
+			timeoutMs: 30_000,
 		});
 
+		// Startup is deliberately slower than the former 1s deadline. Trigger the
+		// same timeout callback through the supported control channel only after
+		// the aggregate verifier is actually running, not during child startup.
+		const readyDeadline = Date.now() + 10_000;
+		while (!fs.existsSync(readyPath) && Date.now() < readyDeadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.ok(fs.existsSync(readyPath), "aggregate verifier must start before timeout delivery");
+		assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${id}.json`)), false);
+		const startedAt = Date.now();
+		deliverTimeoutRequest({ asyncDir, source: "test" });
 		const resultPath = await waitForAsyncResultFile(id, 5_000);
 		const elapsedMs = Date.now() - startedAt;
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
@@ -2335,10 +2360,12 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(interruptedAcceptance?.verifyRuns?.[0]?.id, "slow");
 		assert.equal(interruptedAcceptance?.verifyRuns?.[0]?.status, "timed-out");
 		assert.equal(interruptedAcceptance?.verifyRuns?.[0]?.termination?.method, "posix-process-group");
+		assert.equal(interruptedAcceptance?.verifyRuns?.[0]?.termination?.outcome, "group-exited");
 		assert.equal(dynamicNode?.status, "failed");
-		assert.match(dynamicNode?.error ?? "", /Subagent timed out after 1000ms\./);
+		assert.match(dynamicNode?.error ?? "", /Subagent timed out after 30000ms\./);
 		assert.notEqual(dynamicNode?.acceptanceStatus, "verified");
 		assert.equal(status.timedOut, true);
+		assert.equal(fs.existsSync(finishedPath), false, "verification must be canceled, not finish naturally");
 		assert.ok(elapsedMs < 3_000, `timeout should cancel dynamic aggregate acceptance promptly, elapsed ${elapsedMs}ms`);
 	});
 

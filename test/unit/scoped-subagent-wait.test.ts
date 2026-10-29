@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import fsDefault from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
@@ -203,6 +205,52 @@ describe("scoped async fan-in", () => {
 				assert.ok(!f.probes.includes(999999));
 			} finally { f.close(); }
 		});
+	}
+
+	for (const identity of ["session", "run"] as const) {
+		for (const withResult of [false, true]) {
+			it(`does not reconcile a changed ${identity} identity behind unchanged cached metadata${withResult ? " with persisted result" : ""}`, async (t) => {
+				const f = fixture();
+				f.write("a");
+				const statusPath = path.join(f.asyncDirRoot, "a", "status.json");
+				const originalStat = fsDefault.statSync;
+				const metadata = originalStat(statusPath);
+				const statMock = t.mock.method(fsDefault, "statSync", (...args: Parameters<typeof fs.statSync>) =>
+					String(args[0]) === statusPath ? metadata : originalStat(...args));
+				const resultPath = path.join(f.root, "results", `${identity === "session" ? "a" : "b"}.json`);
+				const originalRead = fsDefault.readFileSync;
+				let foreignResultReads = 0;
+				const readMock = t.mock.method(fsDefault, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+					if (String(args[0]) === resultPath) foreignResultReads++;
+					return originalRead(...args);
+				});
+				syncBuiltinESMExports();
+				try {
+					let changedStatus = "";
+					const result = await f.wait({ ids: ["a"], all: true }, () => {
+						f.write("a", "running", identity === "session"
+							? { sessionId: "other", pid: 999999 }
+							: { runId: "b", pid: 999999 });
+						changedStatus = fs.readFileSync(statusPath, "utf8");
+						if (withResult) {
+							fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+							fs.writeFileSync(resultPath, JSON.stringify({ success: true, state: "complete", results: [] }));
+						}
+					});
+					assert.equal(isError(result), true);
+					assert.match(textOf(result), /completion cannot be confirmed/i);
+					assert.equal(f.polls(), 1);
+					assert.equal(foreignResultReads, 0, "foreign results are not read");
+					assert.ok(!f.probes.includes(999999), "fresh identity is checked before probing a foreign PID");
+					assert.equal(fs.readFileSync(statusPath, "utf8"), changedStatus, "foreign status is not repaired");
+				} finally {
+					statMock.mock.restore();
+					readMock.mock.restore();
+					syncBuiltinESMExports();
+					f.close();
+				}
+			});
+		}
 	}
 
 	it("caps waiting without stopping selected work", async () => {
