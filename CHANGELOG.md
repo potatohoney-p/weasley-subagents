@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Reject malformed or unsafe token counts in persisted session metadata instead of coercing strings, accepting negative values, or returning imprecise totals. Async runners can fall back to reported model-attempt usage when this optional lookup is unavailable.
 - Preserve stopped, paused, timed-out, and checkpoint-rejected outcomes when rebuilding stale async status from persisted results.
 - Keep rejected nested runs and steps terminal in the parent projection after restart or delayed progress delivery.
 - Publish synthetic stale-run results only when no result already exists, preserving real results that arrive during liveness checks. Exclusive publication requires hard-link support on the result filesystem and reports an error without replacing files when unavailable.
