@@ -28,9 +28,18 @@ export function parseSessionTokens(sessionDir: string): TokenUsage | null {
 			try {
 				const entry = JSON.parse(line);
 				const usage = entry.usage ?? entry.message?.usage;
-				if (usage) {
-					input += usage.inputTokens ?? usage.input ?? 0;
-					output += usage.outputTokens ?? usage.output ?? 0;
+				if (usage != null) {
+					// Persisted metadata is not necessarily SDK-validated. Do not
+					// coerce strings or return a plausible partial total on corruption.
+					if (typeof usage !== "object" || Array.isArray(usage)) return null;
+					const nextInput = usage.inputTokens ?? usage.input ?? 0;
+					const nextOutput = usage.outputTokens ?? usage.output ?? 0;
+					if (!Number.isSafeInteger(nextInput) || nextInput < 0
+						|| !Number.isSafeInteger(nextOutput) || nextOutput < 0) return null;
+					input += nextInput;
+					output += nextOutput;
+					if (!Number.isSafeInteger(input) || !Number.isSafeInteger(output)
+						|| !Number.isSafeInteger(input + output)) return null;
 				}
 			} catch {
 				// Ignore malformed lines while scanning usage entries.
