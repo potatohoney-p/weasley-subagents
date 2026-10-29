@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- Preserve stopped, paused, timed-out, and checkpoint-rejected outcomes when rebuilding stale async status from persisted results.
+- Keep rejected nested runs and steps terminal in the parent projection after restart or delayed progress delivery.
+- Publish synthetic stale-run results only when no result already exists, preserving real results that arrive during liveness checks. Exclusive publication requires hard-link support on the result filesystem and reports an error without replacing files when unavailable.
+- Escalate foreground cancellation to SIGKILL when a child ignores SIGTERM, and clear the escalation timer when its lifecycle finishes.
+- Preserve UTF-8 characters split across subprocess pipe reads in acceptance verification output.
+- Attempt owned-process cleanup when acceptance verification is canceled or times out, retain cleanup uncertainty in background results, and stop subsequent verification commands after a timeout.
+- Preserve verified child process termination evidence in async and nested status summaries, including retried and stopped children.
+- Reject already-canceled foreground runs before preparing artifacts, clearing structured output, or spawning a child.
+- Preserve prototype-named chain outputs (such as `__proto__`) through foreground and background result serialization, and reject inherited properties as output references. In-memory output dictionaries now have a null prototype; use `Object.hasOwn` or `Object.keys` rather than inherited object methods. The JSON output shape is unchanged.
+
 ## [0.39.0] - 2026-08-02
 
 ### Added

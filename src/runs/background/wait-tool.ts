@@ -14,6 +14,7 @@ In an interactive chat, do not call this merely to wait: return control to the u
 • { } — return when the first initially active async run or registered provider item finishes, or when a subagent needs attention.
 • { all: true } — wait for every async run and provider item that was active when the call began.
 • { id: "..." } — wait for one async or remembered detached foreground subagent run (id or prefix).
+• { ids: ["run-a", "run-b"], all: true } — wait only for these exact current-session async runs; omit all to return for the first selected completion or attention. Already-terminal selected runs do not extend the wait. Unknown IDs or lost state return an error. Use id or ids, not both. ids excludes providers and remembered foreground runs.
 • { timeoutMs: 600000 } — stop waiting after N ms; active work keeps running.
 
 Provider jobs are session-scoped and identified exactly, so replacing one job with another cannot hide a completion. Provider extensions must be explicitly loaded in this process. In a child agent, keep \`subagent_wait\` in the child tool allowlist and load each provider through the agent's extensions or subagentOnlyExtensions; this tool never loads providers or grants tools itself.${enabled ? "" : "\n\nConfigured behavior: subagent_wait is disabled by config.waitTool or WEASLEY_SUBAGENT_WAIT_TOOL_ENABLED and returns immediately without blocking."}`,

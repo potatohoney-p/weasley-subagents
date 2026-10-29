@@ -94,6 +94,8 @@ subagent({
 
 For background work, pass `async: true`. Inspect it with `subagent({ action: "status" })` or wait for completion with `subagent_wait` when the current turn requires the result.
 
+For a scoped fan-in across independently launched async runs, use `subagent_wait({ ids: ["run-a", "run-b"], all: true })`. Omit `all` to wait for the first selected completion or attention. The selection uses 1–100 unique exact async IDs from the current session and excludes unrelated work; already-terminal selected runs do not extend the wait. Use `id` instead for one prefix or remembered detached foreground run.
+
 ## Built-in roles
 
 | Role | Purpose |
@@ -149,6 +151,12 @@ Common settings include:
 - `artifactDir`, `fleetView`, and `fleetViewPlacement`
 - `intercomBridge` for parent/child coordination
 
+Model spelling normalization resolves only a unique fuzzy match within the preferred
+provider. If multiple revisions or spellings match, the requested model string
+is passed unchanged to Pi instead of selecting the first registry entry. Exact
+registry matches still take precedence. This preserves the existing unresolved
+model behavior; it does not validate or constrain Pi's downstream model matching.
+
 Invalid safety-critical limits fail closed instead of silently becoming unbounded.
 
 ### Writer budget guidance
@@ -191,6 +199,8 @@ Treat these files as local operational data. They are ignored by this repository
 - Sharing requires an explicit per-run request.
 
 Subagents still execute model-generated actions. Review requested permissions, keep credentials out of prompts and repositories, and use the narrowest useful tool set.
+
+Canceled or timed-out acceptance verification stops subsequent verification commands and attempts bounded process cleanup. POSIX cleanup targets the verification's own process group; processes that leave that group are outside its scope. Windows cleanup requests termination of the live verification shell's tree. An exited Windows shell, a failed cleanup command, or a cleanup deadline leaves termination unconfirmed. Verification results retain this evidence in `verifyRuns[].termination`, and background results surface a cleanup warning. Ordinary command completion does not trigger descendant cleanup.
 
 ## Public APIs
 

@@ -59,6 +59,8 @@ function writePackageAgent(name: string): void {
 describe("agent eject/disable/enable/reset management actions", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "weasley-subagents-eject-"));
+		// Own the project root rather than inheriting an ambient ancestor .pi directory.
+		fs.mkdirSync(path.join(tempDir, ".pi"));
 		oldAgentDir = process.env.PI_CODING_AGENT_DIR;
 		process.env.PI_CODING_AGENT_DIR = path.join(tempDir, "agent-home");
 		clearSkillCache();

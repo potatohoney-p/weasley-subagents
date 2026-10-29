@@ -578,7 +578,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 	const chainSkills = chainSkillsParam ?? [];
 
 	const results: SingleResult[] = [];
-	const outputs: ChainOutputMap = {};
+	// Named outputs may use any validated identifier, including __proto__.
+	const outputs: ChainOutputMap = Object.create(null);
 	const dynamicChildren: ChainExecutionDetailsInput["dynamicChildren"] = {};
 	const dynamicGroupStatuses: ChainExecutionDetailsInput["dynamicGroupStatuses"] = {};
 	const allProgress: AgentProgress[] = [];

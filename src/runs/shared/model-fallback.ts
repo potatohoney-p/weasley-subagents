@@ -93,8 +93,8 @@ function resolveBaseModelCandidate(
  * users do not have to spell provider/model exactly. A qualified `provider/id`
  * query only matches within the named provider — this never silently switches
  * providers for security/cost-sensitive configs. Returns the matched `fullId`,
- * or `undefined` when there is no match or the match is ambiguous across
- * providers (and no `preferredProvider` disambiguates). Pure.
+ * or `undefined` when there is no unique match. A preferred provider can
+ * disambiguate providers, but never multiple fuzzy matches within that provider. Pure.
  */
 export function fuzzyResolveModel(
 	baseModel: string,
@@ -131,8 +131,8 @@ export function fuzzyResolveModel(
 	if (candidates.length === 0) return undefined;
 	if (preferredProvider) {
 		const preferredProviderNorm = normalizeModelSegment(preferredProvider);
-		const preferred = candidates.find((entry) => normalizeModelSegment(entry.provider) === preferredProviderNorm);
-		if (preferred) return preferred.fullId;
+		const preferred = candidates.filter((entry) => normalizeModelSegment(entry.provider) === preferredProviderNorm);
+		if (preferred.length > 0) return preferred.length === 1 ? preferred[0]!.fullId : undefined;
 	}
 	if (candidates.length === 1) return candidates[0]!.fullId;
 	return undefined;

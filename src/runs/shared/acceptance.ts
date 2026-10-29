@@ -23,6 +23,7 @@ import type {
 } from "../../shared/types.ts";
 import { isAgentContractV1 } from "./agent-contract.ts";
 import { classifyTaskMutationIntent, taskMayMutate } from "./task-intent.ts";
+import { cleanupVerificationProcess } from "./verification-cleanup.ts";
 
 const LEVEL_RANK: Record<Exclude<AcceptanceLevel, "auto">, number> = {
 	none: 0,
@@ -981,11 +982,16 @@ function runVerifyCommand(command: AcceptanceVerifyCommand, defaultCwd: string, 
 		let stderr = "";
 		let timedOut = false;
 		let settled = false;
-		let hardKill: NodeJS.Timeout | undefined;
+		let observedExitCode: number | null = null;
+		let closed = false;
+		let drainDeadline: NodeJS.Timeout | undefined;
+		let completeCleanup: (() => void) | undefined;
 		const child = spawn(command.command, {
 			cwd,
 			env: { ...process.env, ...(command.env ?? {}) },
 			shell: true,
+			// Only verification commands own this group; never signal the evaluator's group.
+			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
@@ -993,7 +999,7 @@ function runVerifyCommand(command: AcceptanceVerifyCommand, defaultCwd: string, 
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeout);
-			if (hardKill) clearTimeout(hardKill);
+			if (drainDeadline) clearTimeout(drainDeadline);
 			options.signal?.removeEventListener("abort", abortVerification);
 			resolve({
 				id: command.id,
@@ -1006,29 +1012,58 @@ function runVerifyCommand(command: AcceptanceVerifyCommand, defaultCwd: string, 
 		const abortVerification = () => {
 			if (settled || timedOut) return;
 			timedOut = true;
-			child.kill("SIGTERM");
-			hardKill = setTimeout(() => {
-				child.kill("SIGKILL");
-				finish({
-					exitCode: null,
-					status: "timed-out",
-					stdout: trimOutput(stdout),
-					stderr: trimOutput(stderr || options.abortMessage || "Acceptance verification timed out."),
-				});
-			}, 1000);
-			hardKill.unref?.();
+			const finishCleanup = (termination: NonNullable<AcceptanceVerifyResult["termination"]>) => {
+				completeCleanup = () => {
+					if (settled) return;
+					if (!closed) {
+						child.stdout.destroy();
+						child.stderr.destroy();
+					}
+					// An unconfirmed survivor must not keep this evaluator alive forever.
+					// The error listener remains to consume any late child errors.
+					child.unref();
+					finish({
+						exitCode: observedExitCode,
+						status: "timed-out",
+						stdout: trimOutput(stdout),
+						stderr: trimOutput(stderr || options.abortMessage || "Acceptance verification timed out."),
+						termination,
+					});
+				};
+				if (closed || termination.outcome !== "group-exited") completeCleanup();
+				else {
+					// Group disappearance can precede delivery of the final pipe data.
+					drainDeadline = setTimeout(() => {
+						termination = { ...termination, outcome: "unconfirmed", detail: "The owned process group exited, but output pipes did not close before the drain deadline; escaped descendants may remain." };
+						completeCleanup?.();
+					}, 250);
+				}
+			};
+			void cleanupVerificationProcess(child).then(finishCleanup, (error) => finishCleanup({
+				method: process.platform === "win32" ? "windows-taskkill" : "posix-process-group",
+				outcome: "unconfirmed",
+				detail: `Verification cleanup failed: ${error instanceof Error ? error.message : String(error)}; descendants may remain.`,
+			}));
 		};
 		const timeout = setTimeout(abortVerification, command.timeoutMs ?? 120_000);
 		timeout.unref?.();
 		if (options.signal?.aborted) abortVerification();
 		else options.signal?.addEventListener("abort", abortVerification, { once: true });
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdout += chunk.toString();
+		// Decode across pipe reads so split UTF-8 characters survive in evidence.
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			stdout += chunk;
 		});
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+		child.stderr.on("data", (chunk: string) => {
+			stderr += chunk;
 		});
+		child.on("exit", (exitCode) => { observedExitCode = exitCode; });
 		child.on("close", (exitCode) => {
+			closed = true;
+			observedExitCode = exitCode;
+			// Root exit and pipe closure do not settle an in-progress cleanup attempt.
+			if (timedOut) { completeCleanup?.(); return; }
 			const passed = exitCode === 0 && !timedOut;
 			finish({
 				exitCode,
@@ -1038,6 +1073,7 @@ function runVerifyCommand(command: AcceptanceVerifyCommand, defaultCwd: string, 
 			});
 		});
 		child.on("error", (error) => {
+			if (timedOut) return;
 			finish({
 				exitCode: timedOut ? null : 1,
 				status: timedOut ? "timed-out" : command.allowFailure ? "allowed-failure" : "failed",
@@ -1125,7 +1161,7 @@ export async function evaluateAcceptance(input: {
 		ledger.verifyRuns = [];
 		for (const command of acceptance.verify) {
 			ledger.verifyRuns.push(await runVerifyCommand(command, input.cwd, { signal: input.signal, abortMessage: input.abortMessage }));
-			if (input.signal?.aborted) break;
+			if (input.signal?.aborted || ledger.verifyRuns.at(-1)?.status === "timed-out") break;
 		}
 		if (ledger.verifyRuns.some((run) => run.status === "failed" || run.status === "timed-out")) {
 			ledger.status = "rejected";
@@ -1171,7 +1207,7 @@ export async function evaluateAcceptance(input: {
 	return ledger;
 }
 
-export function buildSkippedAcceptanceLedger(acceptance: ResolvedAcceptanceConfig, input: { id: string; message: string }): AcceptanceLedger {
+export function buildSkippedAcceptanceLedger(acceptance: ResolvedAcceptanceConfig, input: { id: string; message: string; verifyRuns?: AcceptanceVerifyResult[] }): AcceptanceLedger {
 	const status = acceptance.level === "none" ? "not-required" : "rejected";
 	return {
 		status,
@@ -1183,16 +1219,24 @@ export function buildSkippedAcceptanceLedger(acceptance: ResolvedAcceptanceConfi
 		runtimeChecks: acceptance.level === "none"
 			? []
 			: [{ id: input.id, status: "failed", message: input.message }],
-		verifyRuns: [],
+		verifyRuns: input.verifyRuns ?? [],
 	};
+}
+
+/** Keep cleanup uncertainty separate from captured stderr and its output limit. */
+export function acceptanceCleanupWarning(ledger: AcceptanceLedger | undefined): string | undefined {
+	const details = ledger?.verifyRuns.flatMap((run) => run.termination && run.termination.outcome !== "group-exited"
+		? [`${run.id}: ${run.termination.detail}`]
+		: []) ?? [];
+	return details.length ? `Acceptance cleanup unconfirmed: ${details.join(" ")}` : undefined;
 }
 
 export function acceptanceFailureMessage(ledger: AcceptanceLedger): string | undefined {
 	if (ledger.status !== "rejected") return undefined;
 	const failedCheck = ledger.runtimeChecks.find((check) => check.status === "failed");
-	if (failedCheck) return `Acceptance rejected: ${failedCheck.message}`;
 	const failedVerify = ledger.verifyRuns.find((run) => run.status === "failed" || run.status === "timed-out");
-	if (failedVerify) return `Acceptance verification '${failedVerify.id}' ${failedVerify.status}.`;
-	if (ledger.reviewResult?.status === "blockers") return "Acceptance review found blockers.";
-	return "Acceptance rejected.";
+	const message = failedCheck ? `Acceptance rejected: ${failedCheck.message}`
+		: failedVerify ? `Acceptance verification '${failedVerify.id}' ${failedVerify.status}.`
+			: ledger.reviewResult?.status === "blockers" ? "Acceptance review found blockers." : "Acceptance rejected.";
+	return [message, acceptanceCleanupWarning(ledger)].filter(Boolean).join(" ");
 }
