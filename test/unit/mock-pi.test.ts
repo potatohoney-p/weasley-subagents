@@ -8,8 +8,36 @@ import { createMockPi } from "../support/mock-pi.ts";
 
 const scriptUrl = new URL("../support/mock-pi-script.mjs", import.meta.url).href;
 
-function startMockChild(queueDir: string, gated = false) {
+function startMockChild(queueDir: string, gated = false, synchronizeClaims = false) {
 	const child = spawn(process.execPath, ["--input-type=module", "-e", `
+		${synchronizeClaims ? `
+			const fs = (await import("node:fs")).default;
+			const path = (await import("node:path")).default;
+			const dir = process.env.MOCK_PI_QUEUE_DIR;
+			const readFileSync = fs.readFileSync;
+			// Unmatched entries are read once in the matcher scan, then again to claim.
+			let firstEntryReads = 0;
+			fs.readFileSync = function(file, ...args) {
+				const result = readFileSync.call(this, file, ...args);
+				if (path.basename(String(file)) === "pending-000001.json" && ++firstEntryReads === 2) {
+					process.send("ready");
+					const deadline = Date.now() + 10_000;
+					while (!fs.existsSync(path.join(dir, "release-claims"))) {
+						if (Date.now() >= deadline) throw new Error("Claim barrier timed out");
+						Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+					}
+					process.disconnect();
+				}
+				return result;
+			};
+			const renameSync = fs.renameSync;
+			fs.renameSync = function(source, target) {
+				if (path.basename(String(source)).startsWith("pending-")) {
+					fs.appendFileSync(path.join(dir, "renames-" + process.pid), path.basename(String(source)) + "\\n");
+				}
+				return renameSync.call(this, source, target);
+			};
+		` : ""}
 		${gated ? 'process.send("ready"); await new Promise(resolve => process.once("message", resolve)); process.disconnect();' : ""}
 		await import(${JSON.stringify(scriptUrl)});
 	`], {
@@ -78,11 +106,19 @@ it("keeps parallel claims unique within the current reset generation", async () 
 		mockPi.reset();
 		const responses = ["first", "second", "third", "fourth"];
 		for (const output of responses) mockPi.onCall({ output });
-		children.push(...responses.map(() => startMockChild(mockPi.dir)));
+		children.push(...responses.map(() => startMockChild(mockPi.dir, false, true)));
+		// Every child has read the same first entry before any can claim it.
+		await Promise.all(children.map(({ child }) => once(child, "message", { signal: AbortSignal.timeout(5_000) })));
+		fs.writeFileSync(path.join(mockPi.dir, "release-claims"), "");
 		const results = await Promise.all(children.map(({ completed }) => completed));
 		assert.deepEqual(results.map(({ stdout }) => stdout.trim()).sort(), [...responses].sort());
 		assert.ok(results.every(({ code, stderr }) => code === 0 && stderr === ""));
 		assert.equal(mockPi.callCount(), responses.length);
+		const renameAttempts = fs.readdirSync(mockPi.dir)
+			.filter(name => name.startsWith("renames-"))
+			.flatMap(name => fs.readFileSync(path.join(mockPi.dir, name), "utf-8").trim().split("\n"));
+		assert.deepEqual(renameAttempts.sort(), responses.map((_, index) => `pending-${String(index + 1).padStart(6, "0")}.json`),
+			"only the exclusive owner may rename each response, even with stale pending-file reads");
 		assert.equal(fs.readdirSync(mockPi.dir).filter(name => name.startsWith("pending-")).length, 0);
 	} finally {
 		for (const { child } of children) if (child.exitCode === null) child.kill();

@@ -68,16 +68,17 @@ function responseMatchesArgs(response, args) {
 function claimResponseFile(dir, fileName) {
 	const sourcePath = path.join(dir, fileName);
 	const targetPath = path.join(dir, fileName.replace(/^pending-/, "consumed-"));
+	// A shared rename destination is not an ownership token on every platform.
+	// Keep this exclusive marker for the generation so stale readers cannot
+	// attempt the same rename after the winner has consumed the response.
 	try {
-		fs.renameSync(sourcePath, targetPath);
-		return JSON.parse(fs.readFileSync(targetPath, "utf-8"));
+		fs.mkdirSync(`${targetPath}.claim`);
 	} catch (error) {
-		if (error && typeof error === "object" && "code" in error) {
-			const code = error.code;
-			if (code === "ENOENT" || code === "EEXIST" || code === "EPERM") return undefined;
-		}
+		if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") return undefined;
 		throw error;
 	}
+	fs.renameSync(sourcePath, targetPath);
+	return JSON.parse(fs.readFileSync(targetPath, "utf-8"));
 }
 
 function claimNextResponse(dir, args) {
