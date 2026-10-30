@@ -90,6 +90,47 @@ describe("watchdog LSP diagnostics", () => {
 		assert.equal(info, undefined);
 	});
 
+	it("returns a failed result when the server closes its input pipe after initialization", async () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-watchdog-lsp-pipe-"));
+		try {
+			const binDir = path.join(temp, "node_modules", ".bin");
+			fs.mkdirSync(path.join(temp, "src"), { recursive: true });
+			fs.mkdirSync(binDir, { recursive: true });
+			fs.writeFileSync(path.join(temp, "src", "file.ts"), "//" + "x".repeat(1024 * 1024));
+			const scriptPath = path.join(binDir, "tls-closed-input.js");
+			fs.writeFileSync(scriptPath, `
+let input = '';
+process.stdin.on('data', chunk => {
+  input += chunk;
+  const boundary = input.indexOf('\\r\\n\\r\\n');
+  if (boundary < 0) return;
+  const length = Number(/Content-Length: (\\d+)/i.exec(input)[1]);
+  if (Buffer.byteLength(input.slice(boundary + 4)) < length) return;
+  const request = JSON.parse(input.slice(boundary + 4));
+  process.stdin.removeAllListeners('data');
+  process.stdin.destroy();
+  try { require('node:fs').closeSync(0); } catch {}
+  const body = JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { capabilities: {} } });
+  process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body);
+});
+setTimeout(() => process.exit(0), 10000);
+`, "utf-8");
+			if (process.platform === "win32") {
+				fs.writeFileSync(path.join(binDir, "typescript-language-server.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0\\tls-closed-input.js" %*\r\n`, "utf-8");
+			} else {
+				fs.writeFileSync(path.join(binDir, "typescript-language-server"), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/tls-closed-input.js" "$@"\n`, { encoding: "utf-8", mode: 0o755 });
+			}
+			const diagnostics = await collectWatchdogLspDiagnostics({
+				cwd: temp, root: temp, changedPaths: ["src/file.ts"],
+				config: { enabled: true, timeoutMs: 5000, maxFiles: 10, maxDiagnostics: 10 },
+			});
+			assert.equal(diagnostics.status, "failed");
+			assert.match(diagnostics.message ?? "", /EPIPE|pipe|closed|write/i);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		}
+	});
+
 	it("returns a failed result for malformed language-server JSON", async () => {
 		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-watchdog-lsp-"));
 		try {

@@ -260,10 +260,12 @@ class JsonRpcLspClient {
 	private readonly child: ChildProcessWithoutNullStreams;
 	private stderr = "";
 	private exited = false;
+	private failure: Error | undefined;
 	private readonly exitWaiters: Array<() => void> = [];
 
 	constructor(child: ChildProcessWithoutNullStreams) {
 		this.child = child;
+		child.stdin.on("error", (error) => this.failProtocol(error));
 		child.stdout.on("data", (chunk: Buffer) => this.handleStdout(chunk));
 		child.stderr.on("data", (chunk: Buffer) => {
 			this.stderr = `${this.stderr}${chunk.toString("utf-8")}`.slice(-MAX_STDERR_LENGTH);
@@ -295,6 +297,11 @@ class JsonRpcLspClient {
 
 	async shutdown(): Promise<void> {
 		if (this.exited) return;
+		if (this.failure) {
+			this.child.kill("SIGTERM");
+			await this.waitForExit(SHUTDOWN_TIMEOUT_MS);
+			return;
+		}
 		try {
 			await this.request("shutdown", null, SHUTDOWN_TIMEOUT_MS);
 			this.notify("exit", null);
@@ -312,7 +319,12 @@ class JsonRpcLspClient {
 		return this.stderr.trim();
 	}
 
+	throwIfFailed(): void {
+		if (this.failure) throw this.failure;
+	}
+
 	private send(payload: JsonRpcMessage): void {
+		this.throwIfFailed();
 		if (this.exited) throw new Error("language server already exited");
 		const body = JSON.stringify(payload);
 		this.child.stdin.write(`Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`);
@@ -365,7 +377,8 @@ class JsonRpcLspClient {
 	}
 
 	private failProtocol(error: Error): void {
-		if (this.exited) return;
+		if (this.exited || this.failure) return;
+		this.failure = error;
 		this.rejectPending(error);
 		this.child.kill("SIGTERM");
 	}
@@ -423,9 +436,11 @@ function initializeParams(root: string): unknown {
 async function waitForDiagnostics(client: JsonRpcLspClient, targets: TargetFile[], timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
 	const started = Date.now();
 	while (!signal?.aborted && Date.now() - started < timeoutMs) {
+		client.throwIfFailed();
 		if (targets.every((target) => client.diagnostics.has(target.uri))) return true;
 		await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(1, timeoutMs - (Date.now() - started)))));
 	}
+	client.throwIfFailed();
 	return targets.every((target) => client.diagnostics.has(target.uri));
 }
 
