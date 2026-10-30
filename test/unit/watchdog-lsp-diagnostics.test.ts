@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
+import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough, Writable } from "node:stream";
 import {
 	WatchdogLspDiagnosticsLedger,
 	collectWatchdogLspDiagnostics,
@@ -88,6 +92,93 @@ describe("watchdog LSP diagnostics", () => {
 			message: "Helpful note.",
 		}]));
 		assert.equal(info, undefined);
+	});
+
+	for (const failingMethod of ["initialize", "initialized"]) {
+		it(`contains an input transport error during ${failingMethod}`, async () => {
+			const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-watchdog-lsp-transport-"));
+			const sent: string[] = [];
+			const stdout = new PassThrough();
+			const child = new EventEmitter() as EventEmitter & { kill(): boolean; stdin: Writable; stdout: PassThrough; stderr: PassThrough };
+			Object.assign(child, {
+				stdout, stderr: new PassThrough(),
+				kill: () => { queueMicrotask(() => child.emit("exit", 1, null)); return true; },
+				stdin: new Writable({ write(chunk, _encoding, callback) {
+					const request = JSON.parse(String(chunk).split("\r\n\r\n")[1]);
+					sent.push(request.method);
+					if (request.method === failingMethod) {
+						callback(Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+						return;
+					}
+					callback();
+					if (request.method === "initialize") {
+						const body = JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { capabilities: {} } });
+						queueMicrotask(() => stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`));
+					}
+				} }),
+			});
+			const spawn = mock.method(childProcess, "spawn", () => child as never);
+			syncBuiltinESMExports();
+			try {
+				const binDir = path.join(temp, "node_modules", ".bin");
+				fs.mkdirSync(path.join(temp, "src"), { recursive: true });
+				fs.mkdirSync(binDir, { recursive: true });
+				fs.writeFileSync(path.join(temp, "src", "file.ts"), "export const x = 1;");
+				fs.writeFileSync(path.join(binDir, "typescript-language-server"), "stub", { mode: 0o755 });
+				const diagnostics = await collectWatchdogLspDiagnostics({
+					cwd: temp, root: temp, changedPaths: ["src/file.ts"],
+					config: { enabled: true, timeoutMs: 5000, maxFiles: 10, maxDiagnostics: 10 },
+				});
+				assert.equal(diagnostics.status, "failed");
+				assert.match(diagnostics.message ?? "", /EPIPE/);
+				assert.equal(sent.includes("shutdown"), false, "must not write shutdown into a failed transport");
+			} finally {
+				spawn.mock.restore();
+				syncBuiltinESMExports();
+				fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+			}
+		});
+	}
+
+	it("returns a failed result when the server closes its input pipe after initialization", { skip: process.platform === "win32" ? "The cmd wrapper retains the input pipe handle; use the injected transport-error tests on Windows." : false }, async () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-watchdog-lsp-pipe-"));
+		try {
+			const binDir = path.join(temp, "node_modules", ".bin");
+			fs.mkdirSync(path.join(temp, "src"), { recursive: true });
+			fs.mkdirSync(binDir, { recursive: true });
+			fs.writeFileSync(path.join(temp, "src", "file.ts"), "//" + "x".repeat(1024 * 1024));
+			const scriptPath = path.join(binDir, "tls-closed-input.js");
+			fs.writeFileSync(scriptPath, `
+let input = '';
+process.stdin.on('data', chunk => {
+  input += chunk;
+  const boundary = input.indexOf('\\r\\n\\r\\n');
+  if (boundary < 0) return;
+  const length = Number(/Content-Length: (\\d+)/i.exec(input)[1]);
+  if (Buffer.byteLength(input.slice(boundary + 4)) < length) return;
+  const request = JSON.parse(input.slice(boundary + 4));
+  process.stdin.removeAllListeners('data');
+  process.stdin.destroy();
+  try { require('node:fs').closeSync(0); } catch {}
+  const body = JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { capabilities: {} } });
+  process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body);
+});
+setTimeout(() => process.exit(0), 10000);
+`, "utf-8");
+			if (process.platform === "win32") {
+				fs.writeFileSync(path.join(binDir, "typescript-language-server.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0\\tls-closed-input.js" %*\r\n`, "utf-8");
+			} else {
+				fs.writeFileSync(path.join(binDir, "typescript-language-server"), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/tls-closed-input.js" "$@"\n`, { encoding: "utf-8", mode: 0o755 });
+			}
+			const diagnostics = await collectWatchdogLspDiagnostics({
+				cwd: temp, root: temp, changedPaths: ["src/file.ts"],
+				config: { enabled: true, timeoutMs: 5000, maxFiles: 10, maxDiagnostics: 10 },
+			});
+			assert.equal(diagnostics.status, "failed");
+			assert.match(diagnostics.message ?? "", /EPIPE|pipe|closed|write/i);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		}
 	});
 
 	it("returns a failed result for malformed language-server JSON", async () => {
