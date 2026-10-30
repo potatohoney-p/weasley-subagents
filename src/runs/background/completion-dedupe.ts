@@ -20,24 +20,26 @@ function asFiniteNumber(value: unknown): number | undefined {
 }
 
 export function buildCompletionKey(data: CompletionDataLike, fallback: string): string {
-	const sessionId = asNonEmptyString(data.sessionId) ?? "no-session";
+	const sessionId = asNonEmptyString(data.sessionId) ?? null;
 	const id = asNonEmptyString(data.id);
-	if (id) return `session:${sessionId}:id:${id}`;
-	const agent = asNonEmptyString(data.agent) ?? "unknown";
+	// Encode field boundaries and missing values explicitly: delimiters and
+	// sentinel words can legitimately occur inside session, run, or agent names.
+	if (id) return JSON.stringify(["id", sessionId, id]);
+	const agent = asNonEmptyString(data.agent) ?? null;
 	const timestamp = asFiniteNumber(data.timestamp);
 	const taskIndex = asFiniteNumber(data.taskIndex);
 	const totalTasks = asFiniteNumber(data.totalTasks);
-	const success = typeof data.success === "boolean" ? (data.success ? "1" : "0") : "?";
-	return [
+	const success = typeof data.success === "boolean" ? data.success : null;
+	return JSON.stringify([
 		"meta",
 		sessionId,
 		agent,
-		timestamp !== undefined ? String(timestamp) : "no-ts",
-		taskIndex !== undefined ? String(taskIndex) : "-",
-		totalTasks !== undefined ? String(totalTasks) : "-",
+		timestamp ?? null,
+		taskIndex ?? null,
+		totalTasks ?? null,
 		success,
 		fallback,
-	].join(":");
+	]);
 }
 
 function pruneSeenMap(seen: Map<string, number>, now: number, ttlMs: number): void {
