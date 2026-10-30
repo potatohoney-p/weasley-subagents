@@ -110,6 +110,30 @@ function completionResult(overrides: Record<string, unknown> = {}) {
 }
 
 describe("registerSubagentNotify", () => {
+	for (const batching of [false, true]) {
+		it(`delivers distinct delimiter-containing identities across sessions (batching=${batching})`, async () => {
+			const events = createEventBus();
+			const sent: unknown[] = [];
+			const state = { currentSessionId: "a:id:b" };
+			const clock = createFakeClock();
+			const notifier = registerSubagentNotify({ events, sendMessage: (message: unknown) => sent.push(message) } as never, state, {
+				batchConfig: { enabled: batching }, timers: clock.api, now: clock.now,
+			});
+			try {
+				const first = completionResult({ sessionId: state.currentSessionId, id: "c" });
+				const firstDelivery = notifier.deliver(first);
+				state.currentSessionId = "a";
+				const second = completionResult({ sessionId: state.currentSessionId, id: "b:id:c" });
+				const secondDelivery = notifier.deliver(second);
+				clock.advance(150);
+				assert.deepEqual(await Promise.all([firstDelivery, secondDelivery]), [true, true]);
+				assert.equal(sent.length, 2);
+				assert.equal(await notifier.deliver(second), true);
+				assert.equal(sent.length, 2, "an exact retry must still be deduplicated");
+			} finally { notifier.dispose(); }
+		});
+	}
+
 	it("uses a fallback summary when a background completion is empty", () => {
 		const { events, sent } = createPi();
 
