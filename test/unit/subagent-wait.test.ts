@@ -62,6 +62,80 @@ function baseDeps(root: string, state: SubagentState, overrides: Partial<Subagen
 }
 
 describe("subagent_wait tool", () => {
+	for (const params of [{}, { all: true }, { id: "run-a" }, { ids: ["run-a"] }]) {
+		for (const nextSession of ["sess-2", null]) {
+			it(`stops ${JSON.stringify(params)} on session change to ${nextSession} after waking`, async () => {
+				const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-origin-session-"));
+				try {
+					const asyncRoot = path.join(root, "runs");
+					const state = makeState("sess-1");
+					writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+					writeStatus(asyncRoot, "foreign", "running", { sessionId: "sess-2", pid: 999998 });
+					let woke = false;
+					let postSwitchProbes = 0;
+					let postSwitchSnapshots = 0;
+					const result = await waitForSubagents(params, undefined, baseDeps(root, state, {
+						kill: () => { if (woke) postSwitchProbes++; return true; },
+						backgroundWork: {
+							snapshot: () => { if (woke) postSwitchSnapshots++; return { providers: [], items: [] }; },
+							wakeChannels: () => [],
+						},
+						sleep: async () => { if (woke) throw new Error("must stop after session change"); woke = true; state.currentSessionId = nextSession; },
+					}));
+					assert.equal(result.isError, true);
+					assert.match(textOf(result), /active session changed.*completion cannot be confirmed/);
+					assert.equal(postSwitchProbes, 0);
+					assert.equal(postSwitchSnapshots, 0);
+				} finally { fs.rmSync(root, { recursive: true, force: true }); }
+			});
+		}
+	}
+
+
+	for (const phase of ["initial", "poll"] as const) {
+		it(`stops when the ${phase} provider snapshot changes the session`, async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-origin-provider-"));
+			try {
+				const state = makeState("sess-1");
+				let snapshots = 0;
+				const result = await waitForSubagents({ all: true }, undefined, baseDeps(root, state, {
+					backgroundWork: {
+						snapshot: (sessionId) => {
+							assert.equal(sessionId, "sess-1");
+							snapshots++;
+							if (phase === "initial" || snapshots === 2) {
+								state.currentSessionId = "sess-2";
+								return { providers: [], items: [] };
+							}
+							return { providers: ["provider"], items: [{ provider: "provider", id: "work", state: "running", sessionId: "sess-1" }] };
+						},
+						wakeChannels: () => [],
+					},
+					sleep: async () => {},
+				}));
+				assert.equal(result.isError, true);
+				assert.match(textOf(result), /active session changed/);
+				assert.equal(snapshots, phase === "initial" ? 1 : 2);
+			} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		});
+	}
+	it("stops before provider discovery if reconciliation changes the session", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-origin-reconcile-"));
+		try {
+			const state = makeState("sess-1");
+			writeStatus(path.join(root, "runs"), "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			let snapshots = 0;
+			const result = await waitForSubagents({}, undefined, baseDeps(root, state, {
+				kill: () => { state.currentSessionId = "sess-2"; return true; },
+				backgroundWork: { snapshot: () => { snapshots++; return { providers: [], items: [] }; }, wakeChannels: () => [] },
+				sleep: async () => { throw new Error("must not sleep after session change"); },
+			}));
+			assert.equal(result.isError, true);
+			assert.match(textOf(result), /active session changed/);
+			assert.equal(snapshots, 0);
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
 	it("resolves waitTool config and environment overrides strictly", () => {
 		assert.deepEqual(resolveWaitToolConfig(undefined, {}), { enabled: true });
 		assert.deepEqual(resolveWaitToolConfig(false, {}), { enabled: false });

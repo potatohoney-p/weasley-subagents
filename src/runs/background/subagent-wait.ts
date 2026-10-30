@@ -518,13 +518,14 @@ export async function waitForSubagents(
 		return result(error instanceof Error ? error.message : String(error), true);
 	}
 	const sessionId = deps.state.currentSessionId;
-	const sessionChanged = () => Boolean(params.ids && deps.state.currentSessionId !== sessionId);
+	const sessionChanged = () => deps.state.currentSessionId !== sessionId;
 	const sessionChangedResult = () => result("Wait stopped because the active session changed; selected run completion cannot be confirmed. Return to the originating session to inspect or wait for these runs.", true);
 
 	const now = deps.now ?? Date.now;
 	const pollIntervalMs = Math.max(MIN_POLL_INTERVAL_MS, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
 	const timeoutMs = params.timeoutMs !== undefined && params.timeoutMs > 0 ? params.timeoutMs : DEFAULT_TIMEOUT_MS;
 	const startedAt = now();
+	if (sessionChanged()) return sessionChangedResult();
 	const waitForAll = params.id ? true : params.all === true;
 
 	let active: AsyncRunSummary[];
@@ -532,6 +533,7 @@ export async function waitForSubagents(
 	let providerSnapshot: BackgroundWorkSnapshot;
 	try {
 		active = activeRunsForSession(params, deps);
+		if (sessionChanged()) return sessionChangedResult();
 		foreground = activeDetachedForegroundRuns(params, deps);
 		providerSnapshot = params.id || params.ids ? { providers: [], items: [] } : backgroundWorkForSession(deps, startedAt);
 	} catch (error) {
@@ -604,8 +606,11 @@ export async function waitForSubagents(
 			await waitForWake(pollIntervalMs, signal, deps, !params.ids);
 			if (sessionChanged()) return sessionChangedResult();
 			active = activeRunsForSession(waitParams, deps);
+			if (sessionChanged()) return sessionChangedResult();
 			attention = attentionRunsForSession(waitParams, deps, initialAsyncIds);
+			if (sessionChanged()) return sessionChangedResult();
 			providerSnapshot = params.id || params.ids ? providerSnapshot : backgroundWorkForSession(deps, now());
+			if (sessionChanged()) return sessionChangedResult();
 			for (const provider of initialProviderNames) {
 				if (!providerSnapshot.providers.includes(provider)) {
 					return result(`Background-work provider '${provider}' disappeared while subagent_wait was tracking its active work; completion cannot be confirmed.`, true);

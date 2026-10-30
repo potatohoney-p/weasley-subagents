@@ -94,7 +94,7 @@ subagent({
 
 For background work, pass `async: true`. Inspect it with `subagent({ action: "status" })` or wait for completion with `subagent_wait` when the current turn requires the result.
 
-For a scoped fan-in across independently launched async runs, use `subagent_wait({ ids: ["run-a", "run-b"], all: true })`. Omit `all` to wait for the first selected completion or attention. The selection uses 1–100 unique exact async IDs from the current session and excludes unrelated work; already-terminal selected runs do not extend the wait. Use `id` instead for one prefix or remembered detached foreground run.
+For a scoped fan-in across independently launched async runs, use `subagent_wait({ ids: ["run-a", "run-b"], all: true })`. Omit `all` to wait for the first selected completion or attention. The selection uses 1–100 unique exact async IDs from the current session and excludes unrelated work; already-terminal selected runs do not extend the wait. Use `id` instead for one prefix or remembered detached foreground run. All wait modes remain bound to the session that started the wait. If the active session changes or closes while waiting, the wait returns an error without claiming completion; return to the originating session to inspect the work.
 
 ## Built-in roles
 
