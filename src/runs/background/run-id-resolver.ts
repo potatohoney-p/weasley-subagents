@@ -87,8 +87,10 @@ export function resolveSubagentRunId(id: string, deps: ResolveSubagentRunIdDeps 
 	for (const match of findNestedRunMatchesById(id, nestedScope ? { prefix: true, scope: nestedScope } : { prefix: true })) {
 		matches.push({ kind: "nested", id: match.run.id, match });
 	}
-	const unique = new Map(matches.map((match) => [`${match.kind}:${match.id}`, match]));
-	const values = [...unique.values()];
+	// A nested ID is local to its registry/address. Distinct matches with the
+	// same ID must remain ambiguous, just as they are in the exact lookup.
+	const unique = new Map(matches.filter((match) => match.kind !== "nested").map((match) => [`${match.kind}:${match.id}`, match]));
+	const values = [...unique.values(), ...matches.filter((match) => match.kind === "nested")];
 	if (values.length > 1) {
 		throw new Error(`Ambiguous subagent run id prefix '${id}' matched: ${values.map((match) => `${match.kind}:${match.id}`).join(", ")}. Provide a longer id.`);
 	}

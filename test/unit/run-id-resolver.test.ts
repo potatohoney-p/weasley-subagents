@@ -139,6 +139,28 @@ describe("subagent run id resolver", () => {
 		}
 	});
 
+	for (const useState of [false, true]) {
+		it(`rejects colliding nested prefixes across authorized registries (${useState ? "state" : "explicit scope"})`, () => {
+			const first = nested("prefix-root-first", "duplicate-child");
+			const second = nested("prefix-root-second", "duplicate-child");
+			const state = stateWithNestedRoute(first);
+			state.foregroundControls.set(second.rootRunId, { runId: second.rootRunId, mode: "single", startedAt: 1, updatedAt: 1, nestedRoute: second });
+			const deps = useState ? { state } : { nested: { routes: [first, second] } };
+			assert.throws(() => resolveSubagentRunId("duplicate-child", deps), /ambiguous across authorized registries/i);
+			for (const prefix of ["dup", "duplicate-chil"]) {
+				assert.throws(() => resolveSubagentRunId(prefix, deps), /Ambiguous subagent run id prefix/);
+			}
+		});
+	}
+
+	it("resolves a colliding child prefix when only one registry is authorized", () => {
+		const allowed = nested("prefix-root-allowed", "collision-child");
+		nested("prefix-root-other", "collision-child");
+		const resolved = resolveSubagentRunId("collision", { nested: { routes: [allowed] } });
+		assert.equal(resolved?.kind, "nested");
+		assert.equal(resolved?.kind === "nested" ? resolved.match.rootRunId : undefined, allowed.rootRunId);
+	});
+
 	it("rejects unsafe nested id tokens before lookup", () => {
 		assert.throws(() => resolveSubagentRunId("../run"), /safe id token/);
 		assert.throws(() => resolveSubagentRunId("a/b"), /safe id token/);
