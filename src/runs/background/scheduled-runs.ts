@@ -395,7 +395,6 @@ export class ScheduledRunManager {
 		if (job.state === "running") return textResult(`Scheduled run ${job.id} already launched async run ${job.lastRunId ?? "unknown"}; interrupt that async run instead.`, true);
 		if (terminalState(job.state)) return textResult(`Scheduled run ${job.id} is already ${job.state}.`, true);
 		const now = this.now();
-		this.clearTimer(job.id);
 		store.mutate((data) => {
 			const stored = data.jobs.find((candidate) => candidate.id === job.id);
 			if (!stored) return;
@@ -403,6 +402,8 @@ export class ScheduledRunManager {
 			stored.canceledAt = now;
 			stored.updatedAt = now;
 		});
+		// Keep the live schedule consistent with durable state if persistence fails.
+		this.clearTimer(job.id);
 		return textResult(`Canceled scheduled subagent run ${job.id}.`);
 	}
 
