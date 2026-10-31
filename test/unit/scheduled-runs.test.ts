@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import fsDefault from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -309,6 +311,36 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 		assert.equal(harness.timers.pendingCount(), 0);
 		const status = await harness.manager.handleToolCall({ action: "schedule-status", id }, harness.ctx);
 		assert.match(status.content[0]!.text, /State: canceled/);
+	});
+
+	it("keeps a schedule armed when cancellation cannot be persisted, allowing a retry", async (t) => {
+		const harness = freshHarness();
+		const created = await harness.manager.handleToolCall({ action: "schedule", agent: "scout", task: "x", schedule: "+10m" }, harness.ctx);
+		const id = extractId({ content: created.content.filter((part) => part.type === "text") });
+		const storePath = scheduledRunStorePath(harness.ctx.cwd, harness.ctx.sessionManager.getSessionFile()!, harness.storeRoot);
+		const originalRename = fsDefault.renameSync;
+		const renameMock = t.mock.method(fsDefault, "renameSync", (...args: Parameters<typeof fs.renameSync>) => {
+			if (args[1] === storePath) throw new Error("simulated scheduled store write failure");
+			return originalRename(...args);
+		});
+		syncBuiltinESMExports();
+		try {
+			const canceled = await harness.manager.handleToolCall({ action: "schedule-cancel", id }, harness.ctx);
+			assert.equal("isError" in canceled && canceled.isError === true, true);
+			assert.match(canceled.content.find((part) => part.type === "text")!.text, /simulated scheduled store write failure/);
+			const status = await harness.manager.handleToolCall({ action: "schedule-status", id }, harness.ctx);
+			assert.match(status.content.find((part) => part.type === "text")!.text, /State: scheduled/);
+			assert.equal(harness.timers.pendingCount(), 1);
+		} finally {
+			renameMock.mock.restore();
+			syncBuiltinESMExports();
+		}
+		const retried = await harness.manager.handleToolCall({ action: "schedule-cancel", id }, harness.ctx);
+		assert.equal("isError" in retried && retried.isError === true, false);
+		assert.equal(harness.timers.pendingCount(), 0);
+		assert.equal(harness.launches.length, 0);
+		const status = await harness.manager.handleToolCall({ action: "schedule-status", id }, harness.ctx);
+		assert.match(status.content.find((part) => part.type === "text")!.text, /State: canceled/);
 	});
 
 	it("cancel refuses a terminal job", async () => {
