@@ -472,3 +472,59 @@ describe("control channel: watchAsyncControlInbox", () => {
 		}
 	});
 });
+
+describe("control channel: transient steering reads", () => {
+	for (const kind of ["request", "ack"] as const) {
+		for (const code of ["EIO", "EACCES"]) {
+			it(`retains unread ${kind} files after ${code} and continues draining healthy files`, () => {
+				const asyncDir = tmpAsyncDir("pi-control-read-retry-");
+				try {
+					let retryPath: string;
+					let consume: (impl?: typeof fs) => unknown[];
+					if (kind === "request") {
+						retryPath = requestAsyncSteer(asyncDir, { message: "retry", id: "retry", ts: 1 });
+						requestAsyncSteer(asyncDir, { message: "healthy", id: "healthy", ts: 2 });
+						consume = (impl) => consumeSteerRequests(asyncDir, impl);
+					} else {
+						writeSteerAck(asyncDir, { requestId: "retry", index: 0, ts: 1, state: "delivered", message: "retry" });
+						writeSteerAck(asyncDir, { requestId: "healthy", index: 1, ts: 2, state: "delivered", message: "healthy" });
+						retryPath = steerAckPathFromDir(steerAcksDir(asyncDir, 0), "retry");
+						consume = (impl) => consumeSteerAcks(asyncDir, impl);
+					}
+					const fsImpl = {
+						...fs,
+						readFileSync: ((target: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+							if (target === retryPath) throw Object.assign(new Error("temporary read failure"), { code });
+							return (fs.readFileSync as Function)(target, ...args);
+						}) as typeof fs.readFileSync,
+					};
+					assert.deepEqual(consume(fsImpl).map((item) => (item as { message: string }).message), ["healthy"]);
+					assert.equal(fs.existsSync(retryPath), true, "unread data must survive for the next poll");
+					assert.deepEqual(consume().map((item) => (item as { message: string }).message), ["retry"]);
+					assert.equal(fs.existsSync(retryPath), false);
+					assert.deepEqual(consume(), []);
+				} finally {
+					cleanup(asyncDir);
+				}
+			});
+		}
+	}
+});
+
+describe("control channel: malformed steering data", () => {
+	for (const kind of ["request", "ack"] as const) {
+		it(`still removes readable malformed ${kind} files`, () => {
+			const asyncDir = tmpAsyncDir("pi-control-read-invalid-");
+			try {
+				const dir = kind === "request" ? steerRequestsDir(asyncDir) : steerAcksDir(asyncDir, 0);
+				fs.mkdirSync(dir, { recursive: true });
+				fs.writeFileSync(path.join(dir, "bad-json.json"), "{");
+				fs.writeFileSync(path.join(dir, "bad-schema.json"), JSON.stringify({ type: "invalid" }));
+				assert.deepEqual(kind === "request" ? consumeSteerRequests(asyncDir) : consumeSteerAcks(asyncDir), []);
+				assert.deepEqual(fs.readdirSync(dir), []);
+			} finally {
+				cleanup(asyncDir);
+			}
+		});
+	}
+});

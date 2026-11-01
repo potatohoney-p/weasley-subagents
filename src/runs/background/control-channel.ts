@@ -381,8 +381,13 @@ export function consumeSteerAcks(asyncDir: string, fsImpl: Pick<typeof fs, "exis
 		try { entries = fsImpl.readdirSync(dir).filter((name) => name.endsWith(".json")).sort(); } catch { continue; }
 		for (const entry of entries) {
 			const target = path.join(dir, entry);
+			let contents: string;
+			try { contents = fsImpl.readFileSync(target, "utf-8"); } catch {
+				// A failed read is not malformed data: leave it for the next poll.
+				continue;
+			}
 			let ack: SteerAck | undefined;
-			try { ack = parseSteerAck(JSON.parse(fsImpl.readFileSync(target, "utf-8"))); } catch { ack = undefined; }
+			try { ack = parseSteerAck(JSON.parse(contents)); } catch { ack = undefined; }
 			try { fsImpl.rmSync(target, { force: true }); } catch { continue; }
 			if (ack) acks.push(ack);
 		}
@@ -417,9 +422,16 @@ export function consumeSteerRequestsFromDir(dir: string, fsImpl: Pick<typeof fs,
 	const requests: SteerRequest[] = [];
 	for (const entry of entries) {
 		const requestPath = path.join(dir, entry);
+		let contents: string;
+		try {
+			contents = fsImpl.readFileSync(requestPath, "utf-8");
+		} catch {
+			// Preserve unread requests for retry, without blocking other entries.
+			continue;
+		}
 		let parsed: SteerRequest | undefined;
 		try {
-			parsed = parseSteerRequest(JSON.parse(fsImpl.readFileSync(requestPath, "utf-8")));
+			parsed = parseSteerRequest(JSON.parse(contents));
 		} catch {
 			parsed = undefined;
 		}
