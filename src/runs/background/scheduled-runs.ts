@@ -252,6 +252,7 @@ function sanitizeScheduledParams(params: SubagentParamsLike): { params?: Subagen
 
 export class ScheduledRunManager {
 	private store: ScheduledRunStore | undefined;
+	private storePath: string | undefined;
 	private ctx: ExtensionContext | undefined;
 	private timers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly storeRoot: string;
@@ -273,26 +274,30 @@ export class ScheduledRunManager {
 		this.ctx = ctx;
 		if (!scheduledRunsEnabled(this.deps.config)) {
 			this.store = undefined;
+			this.storePath = undefined;
 			return;
 		}
 		const sessionId = resolveCurrentSessionId(ctx.sessionManager);
-		this.store = new ScheduledRunStore(scheduledRunStorePath(ctx.cwd, sessionId, this.storeRoot), ctx.cwd, sessionId);
+		this.storePath = scheduledRunStorePath(ctx.cwd, sessionId, this.storeRoot);
+		this.store = new ScheduledRunStore(this.storePath, ctx.cwd, sessionId);
 		this.rearmScheduledJobs();
 	}
 
 	stop(): void {
 		this.stopTimers();
 		this.store = undefined;
+		this.storePath = undefined;
 		this.ctx = undefined;
 	}
 
 	async handleToolCall(params: SubagentParamsLike, ctx: ExtensionContext): Promise<AgentToolResult<Details>> {
-		this.ctx = ctx;
 		try {
 			if (!scheduledRunsEnabled(this.deps.config)) {
 				return textResult("Scheduled subagent runs are disabled. Set { \"scheduledRuns\": { \"enabled\": true } } in ~/.pi/agent/extensions/weasley-subagents/config.json, then reload Pi. Schedule only explicit delayed runs the user asked for.", true);
 			}
-			if (!this.store) this.bindSession(ctx);
+			const storePath = scheduledRunStorePath(ctx.cwd, resolveCurrentSessionId(ctx.sessionManager), this.storeRoot);
+			if (!this.store || this.storePath !== storePath) this.bindSession(ctx);
+			else this.ctx = ctx;
 			if (!this.store) return textResult("Scheduled subagent store is unavailable for this session.", true);
 			switch (params.action) {
 				case "schedule": return this.createJob(params, ctx);

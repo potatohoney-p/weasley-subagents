@@ -104,6 +104,12 @@ function createHarness(options: { config?: ExtensionConfig; storeRoot?: string; 
 	return { manager, timers, launches, clock, storeRoot, ctx };
 }
 
+async function callTextTool(manager: ScheduledRunManager, params: Parameters<ScheduledRunManager["handleToolCall"]>[0], ctx: ExtensionContext) {
+	const result = await manager.handleToolCall(params, ctx);
+	assert.ok(result.content.every((item) => item.type === "text"));
+	return result as unknown as { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+}
+
 function extractId(result: { content: Array<{ type: "text"; text: string }> }): string {
 	const text = result.content[0]!.text;
 	const match = text.match(/Scheduled subagent run (id-[a-z0-9]+)/);
@@ -182,6 +188,44 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 		const harness = createHarness(options);
 		storeRoots.push(harness.storeRoot);
 		return harness;
+	}
+
+	for (const changed of ["session", "cwd"] as const) {
+		it(`isolates schedule management after a ${changed} change without a lifecycle rebind`, async () => {
+			const harness = freshHarness();
+			const oldId = extractId(await callTextTool(harness.manager, { action: "schedule", agent: "scout", task: "old", schedule: "+10m" }, harness.ctx));
+			const nextCtx = changed === "session" ? makeCtx("/project", "/sessions/next.jsonl") : makeCtx("/other-project");
+			const listed = await callTextTool(harness.manager, { action: "schedule-list" }, nextCtx);
+			assert.match(listed.content[0]!.text, /No scheduled/);
+			assert.equal(harness.timers.pendingCount(), 0, "old session timers must be stopped");
+			for (const action of ["schedule-status", "schedule-cancel"] as const) {
+				const result = await callTextTool(harness.manager, { action, id: oldId }, nextCtx);
+				assert.equal(isError(result), true);
+				assert.match(result.content[0]!.text, /not found/);
+			}
+			const oldStatus = await callTextTool(harness.manager, { action: "schedule-status", id: oldId }, harness.ctx);
+			assert.match(oldStatus.content[0]!.text, /State: scheduled/);
+			assert.equal(harness.timers.pendingCount(), 1, "returning must rearm the old session");
+		});
+
+		it(`persists new schedules in the new ${changed} store`, async () => {
+			const harness = freshHarness();
+			extractId(await callTextTool(harness.manager, { action: "schedule", agent: "scout", task: "old", schedule: "+10m" }, harness.ctx));
+			const nextCtx = changed === "session" ? makeCtx("/project", "/sessions/next.jsonl") : makeCtx("/other-project");
+			const nextId = extractId(await callTextTool(harness.manager, { action: "schedule", agent: "scout", task: "next", schedule: "+1s" }, nextCtx));
+			const nextPath = scheduledRunStorePath(nextCtx.cwd, nextCtx.sessionManager.getSessionFile()!, harness.storeRoot);
+			const stored = JSON.parse(fs.readFileSync(nextPath, "utf8"));
+			assert.equal(stored.jobs.length, 1);
+			assert.equal(stored.jobs[0].id, nextId);
+			harness.clock.now += 1000;
+			harness.timers.fireAll();
+			await flushMicrotasks();
+			assert.equal(harness.launches.length, 1);
+			assert.equal(harness.launches[0]!.ctx, nextCtx);
+			assert.equal(harness.launches[0]!.params.task, "next");
+			harness.launches[0]!.resolve({ content: [{ type: "text", text: "ok" }], details: { asyncId: "next-run" } });
+			await flushMicrotasks();
+		});
 	}
 
 	it("rejects schedule actions when the feature is disabled", async () => {
