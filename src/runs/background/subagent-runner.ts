@@ -2217,9 +2217,10 @@ async function runSubagent(
 		exitCode: 1,
 		stopped: true,
 	});
-	const consumePendingAppendRequests = (): void => {
+	let chainAppendError: string | undefined;
+	const consumePendingAppendRequests = (): string | undefined => {
 		if (statusPayload.mode !== "chain" || statusPayload.state !== "running") return;
-		const requests = consumeChainAppendRequests(asyncDir);
+		const { requests, error } = consumeChainAppendRequests(asyncDir);
 		if (requests.length === 0) {
 			const pendingAppends = countPendingChainAppendRequests(asyncDir);
 			if ((statusPayload.pendingAppends ?? 0) !== pendingAppends) {
@@ -2227,7 +2228,7 @@ async function runSubagent(
 				statusPayload.lastUpdate = Date.now();
 				writeStatusPayload();
 			}
-			return;
+			return error;
 		}
 		const appendedSteps = requests.flatMap((request) => request.steps);
 		steps.push(...appendedSteps);
@@ -2255,6 +2256,7 @@ async function runSubagent(
 				pendingAppends,
 			}));
 		}
+		return error;
 	};
 	const markDynamicGraphGroup = (stepIndex: number, status: "completed" | "failed" | "running" | "stopped", error?: string, acceptance?: import("../../shared/types.ts").AcceptanceLedger): void => {
 		const groupNode = statusPayload.workflowGraph?.nodes.find((node) => node.id === `step-${stepIndex}`);
@@ -2948,8 +2950,16 @@ async function runSubagent(
 
 	while (true) {
 		if (interrupted || timedOut || stopped || turnBudgetExceeded) break;
-		consumePendingAppendRequests();
-		if (stepCursor >= steps.length) break;
+		const appendError = consumePendingAppendRequests();
+		if (stepCursor >= steps.length) {
+			// Finish accepted work, but never report success while a queued append
+			// remains blocked. Keep the request on disk for explicit recovery.
+			if (appendError) {
+				chainAppendError = appendError;
+				statusPayload.error = appendError;
+			}
+			break;
+		}
 		refreshUsageBudget();
 		if (statusPayload.usageBudget?.exhausted) {
 			usageBudgetExceeded = true;
@@ -4292,9 +4302,9 @@ async function runSubagent(
 			id,
 			agent: agentName,
 			mode: resultMode,
-			success: !checkpointRejected && !stopped && !timedOut && !turnBudgetExceeded && !usageBudgetExceeded && !interrupted && !signalTerminated && results.every((r) => r.success),
-			state: checkpointRejected ? "rejected" : stopped || signalTerminated ? "stopped" : timedOut || turnBudgetExceeded || usageBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed",
-			summary: checkpointRejected ? (statusPayload.error ?? "Checkpoint rejected.") : stopped ? stopMessage : signalTerminated ? (statusPayload.error ?? "Subagent process terminated by signal.") : timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? (statusPayload.error ?? "Subagent exceeded turn budget.") : usageBudgetExceeded ? (statusPayload.error ?? "Usage budget exhausted.") : interrupted ? "Paused after interrupt. Waiting for explicit next action." : summary,
+			success: !checkpointRejected && !stopped && !timedOut && !turnBudgetExceeded && !usageBudgetExceeded && !chainAppendError && !interrupted && !signalTerminated && results.every((r) => r.success),
+			state: checkpointRejected ? "rejected" : stopped || signalTerminated ? "stopped" : timedOut || turnBudgetExceeded || usageBudgetExceeded || chainAppendError ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed",
+			summary: checkpointRejected ? (statusPayload.error ?? "Checkpoint rejected.") : stopped ? stopMessage : signalTerminated ? (statusPayload.error ?? "Subagent process terminated by signal.") : timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? (statusPayload.error ?? "Subagent exceeded turn budget.") : usageBudgetExceeded ? (statusPayload.error ?? "Usage budget exhausted.") : chainAppendError ? chainAppendError : interrupted ? "Paused after interrupt. Waiting for explicit next action." : summary,
 			...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
 			...(config.deadlineAt !== undefined ? { deadlineAt: config.deadlineAt } : {}),
 			...(statusPayload.turnBudget ? { turnBudget: statusPayload.turnBudget } : {}),
@@ -4304,7 +4314,7 @@ async function runSubagent(
 			...(statusPayload.toolBudgetBlocked ? { toolBudgetBlocked: true } : {}),
 			...(statusPayload.usageBudget ? { usageBudget: statusPayload.usageBudget } : {}),
 			...(statusPayload.checkpoint ? { checkpoint: statusPayload.checkpoint } : {}),
-			...(stopped ? { stopped: true, error: stopMessage } : timedOut ? { timedOut: true, error: timeoutMessage ?? "Subagent timed out." } : turnBudgetExceeded ? { error: statusPayload.error ?? "Subagent exceeded turn budget." } : usageBudgetExceeded ? { error: statusPayload.error ?? "Usage budget exhausted." } : {}),
+			...(stopped ? { stopped: true, error: stopMessage } : timedOut ? { timedOut: true, error: timeoutMessage ?? "Subagent timed out." } : turnBudgetExceeded ? { error: statusPayload.error ?? "Subagent exceeded turn budget." } : usageBudgetExceeded ? { error: statusPayload.error ?? "Usage budget exhausted." } : chainAppendError ? { error: chainAppendError } : {}),
 			results: results.map((r) => ({
 				agent: r.agent,
 				context: r.context,
@@ -4352,7 +4362,7 @@ async function runSubagent(
 			parallelHandoff: statusPayload.parallelHandoff,
 			capabilityCeiling: statusPayload.capabilityCeiling,
 			capabilityAudit: statusPayload.capabilityAudit,
-			exitCode: checkpointRejected || stopped || timedOut || turnBudgetExceeded || usageBudgetExceeded ? 1 : interrupted || results.every((r) => r.success) ? 0 : 1,
+			exitCode: checkpointRejected || stopped || timedOut || turnBudgetExceeded || usageBudgetExceeded || chainAppendError ? 1 : interrupted || results.every((r) => r.success) ? 0 : 1,
 			timestamp: runEndedAt,
 			durationMs: runEndedAt - overallStartTime,
 			totalTokens: statusPayload.totalTokens,

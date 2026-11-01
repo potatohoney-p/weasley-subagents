@@ -116,18 +116,30 @@ export function readPendingChainAppendRequests(asyncDir: string): ChainAppendReq
 		.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
 }
 
-export function consumeChainAppendRequests(asyncDir: string): ChainAppendRequest[] {
+export interface ChainAppendConsumption {
+	requests: ChainAppendRequest[];
+	/** Remaining requests stay queued; already consumed requests must still be accepted. */
+	error?: string;
+}
+
+export function consumeChainAppendRequests(asyncDir: string): ChainAppendConsumption {
 	const requests: ChainAppendRequest[] = [];
+	let error: string | undefined;
 	for (const filePath of listAppendRequestFiles(asyncDir)) {
-		const request = readAppendRequest(filePath);
 		try {
+			const request = readAppendRequest(filePath);
+			// Only a successful removal grants this consumer the request. A failed
+			// removal must never yield work that another poll could execute again.
 			fs.unlinkSync(filePath);
-		} catch {
-			// The runner should not execute a consumed request twice.
+			if (request) requests.push(request);
+		} catch (cause) {
+			if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
+			error = `Failed to consume chain append request '${path.basename(filePath)}': ${cause instanceof Error ? cause.message : String(cause)}`;
+			break;
 		}
-		if (request) requests.push(request);
 	}
-	return requests.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+	requests.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+	return { requests, ...(error ? { error } : {}) };
 }
 
 function statusStepForTask(task: RunnerSubagentStep): StatusStep {

@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMinimalCtx, removeTempDir, tryImport } from "../support/helpers.ts";
 import type { MockPi } from "../support/helpers.ts";
 import { deliverCheckpointDecisionRequest, deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest } from "../../src/runs/background/control-channel.ts";
@@ -558,6 +559,79 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.deepEqual(status.steps?.[0]?.runtimeAcknowledgedExtensions, runtimeAck);
 		assert.ok(!JSON.stringify(launch.details.launchResolvedExtensions).includes(tempDir), "projection should not expose raw extension paths");
 	});
+
+	for (const transient of [false, true]) {
+		it(`finishes accepted append work and ${transient ? "recovers a transient" : "fails a persistent"} blocked append queue`, { skip: !isAsyncAvailable?.() ? "jiti not available" : undefined }, async () => {
+			const id = `async-append-blocked-${Date.now().toString(36)}`;
+			const asyncDir = path.join(ASYNC_DIR!, id);
+			const appendDir = path.join(asyncDir, "append-requests");
+			fs.mkdirSync(appendDir, { recursive: true });
+			for (const [index, agent] of ["accepted", "blocked", "later"].entries()) {
+				fs.writeFileSync(path.join(appendDir, `${index}-${agent}.json`), JSON.stringify({
+					id: agent, createdAt: index,
+					steps: [{ agent, task: agent, inheritProjectContext: false, inheritSkills: false, completionGuard: false }],
+				}));
+			}
+			const blockedFile = path.join(appendDir, "1-blocked.json");
+			const preload = path.join(tempDir, "append-unlink-failure.mjs");
+			fs.writeFileSync(preload, `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const unlink = fs.unlinkSync;
+let failures = 0;
+fs.unlinkSync = (file) => {
+  if (String(file) === ${JSON.stringify(blockedFile)} && (!${transient} || failures++ === 0)) throw Object.assign(new Error("injected append EACCES"), { code: "EACCES" });
+  return unlink(file);
+};
+syncBuiltinESMExports();`);
+			mockPi.onCall({ output: "original done" });
+			mockPi.onCall({ output: "accepted done" });
+			if (transient) {
+				mockPi.onCall({ output: "blocked recovered" });
+				mockPi.onCall({ output: "later done" });
+			}
+			const oldNodeOptions = process.env.NODE_OPTIONS;
+			try {
+				process.env.NODE_OPTIONS = `${oldNodeOptions ?? ""} --import=${pathToFileURL(preload).href}`.trim();
+				const launch = executeAsyncChain!(id, {
+					chain: [{ agent: "worker", task: "Original work" }],
+					agents: [makeAgent("worker", { completionGuard: false })],
+					ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-append" },
+					artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+					shareEnabled: false,
+					maxSubagentDepth: 2,
+					timeoutMs: 30_000,
+				});
+				assert.equal(launch.isError, undefined);
+			} finally {
+				if (oldNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+				else process.env.NODE_OPTIONS = oldNodeOptions;
+			}
+			const resultPath = await waitForAsyncResultFile(id, 40_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf8")) as AsyncResultPayload;
+			if (transient) {
+				assert.equal(payload.state, "complete");
+				assert.equal(payload.success, true);
+				assert.equal(payload.exitCode, 0);
+				assert.equal(payload.error, undefined);
+				assert.deepEqual(payload.results.map((result) => result.agent), ["worker", "accepted", "blocked", "later"]);
+				assert.equal(mockPi.callCount(), 4);
+				assert.deepEqual(fs.readdirSync(appendDir), []);
+				return;
+			}
+			assert.equal(payload.state, "failed");
+			assert.equal(payload.success, false);
+			assert.match(payload.error ?? "", /Failed to consume chain append request.*injected append EACCES/);
+			assert.equal(payload.exitCode, 1);
+			assert.equal(payload.summary, payload.error);
+			assert.deepEqual(payload.results.map((result) => result.agent), ["worker", "accepted"]);
+			assert.equal(mockPi.callCount(), 2);
+			assert.deepEqual(fs.readdirSync(appendDir).sort(), ["1-blocked.json", "2-later.json"]);
+			const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf8"));
+			assert.equal(status.state, "failed");
+			assert.equal(status.pendingAppends, 2);
+			assert.equal(status.error, payload.error);
+		});
+	}
 
 	it("async chain checkpoints pause before the next child until approved", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ output: "analysis done" });
