@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import fsDefault from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
@@ -62,10 +64,84 @@ describe("chain append requests", () => {
 			const eventLog = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8");
 			assert.match(eventLog, /subagent\.chain\.append\.requested/);
 
-			const consumed = consumeChainAppendRequests(asyncDir);
+			const { requests: consumed, error } = consumeChainAppendRequests(asyncDir);
+			assert.equal(error, undefined);
 			assert.equal(consumed.length, 1);
 			assert.equal(consumed[0]!.id, result.request.id);
 			assert.equal(countPendingChainAppendRequests(asyncDir), 0);
+		} finally {
+			removeTempDir(root);
+		}
+	});
+
+	for (const code of ["EACCES", "EBUSY"] as const) {
+		it(`retains blocked ${code} requests without replaying or losing an earlier consumed batch`, (t) => {
+			const root = createTempDir("pi-chain-append-blocked-");
+			const dir = path.join(root, "append-requests");
+			fs.mkdirSync(dir);
+			for (const id of ["a", "b", "c"]) {
+				fs.writeFileSync(path.join(dir, `100-${id}.json`), JSON.stringify({ id, createdAt: 100, steps: [runnerStep(id)] }));
+			}
+			const blocked = path.join(dir, "100-b.json");
+			const unlink = fsDefault.unlinkSync;
+			const mock = t.mock.method(fsDefault, "unlinkSync", (file: fs.PathLike) => {
+				if (String(file) === blocked) throw Object.assign(new Error(`injected ${code}`), { code });
+				return unlink(file);
+			});
+			syncBuiltinESMExports();
+			try {
+				const first = consumeChainAppendRequests(root);
+				assert.deepEqual(first.requests.map((request) => request.id), ["a"]);
+				assert.match(first.error ?? "", new RegExp(code));
+				assert.deepEqual(fs.readdirSync(dir).sort(), ["100-b.json", "100-c.json"]);
+				const second = consumeChainAppendRequests(root);
+				assert.deepEqual(second.requests, []);
+				assert.match(second.error ?? "", new RegExp(code));
+				mock.mock.restore();
+				syncBuiltinESMExports();
+				assert.deepEqual(consumeChainAppendRequests(root).requests.map((request) => request.id), ["b", "c"]);
+				assert.deepEqual(consumeChainAppendRequests(root), { requests: [] });
+			} finally {
+				mock.mock.restore();
+				syncBuiltinESMExports();
+				removeTempDir(root);
+			}
+		});
+	}
+
+	it("does not yield a request when another consumer removes it first", (t) => {
+		const root = createTempDir("pi-chain-append-race-");
+		const dir = path.join(root, "append-requests");
+		fs.mkdirSync(dir);
+		const file = path.join(dir, "100-a.json");
+		fs.writeFileSync(file, JSON.stringify({ id: "a", createdAt: 100, steps: [runnerStep("worker")] }));
+		const unlink = fsDefault.unlinkSync;
+		const mock = t.mock.method(fsDefault, "unlinkSync", (target: fs.PathLike) => {
+			unlink(target);
+			throw Object.assign(new Error("another consumer won"), { code: "ENOENT" });
+		});
+		syncBuiltinESMExports();
+		try {
+			assert.deepEqual(consumeChainAppendRequests(root), { requests: [] });
+			assert.equal(fs.existsSync(file), false);
+		} finally {
+			mock.mock.restore();
+			syncBuiltinESMExports();
+			removeTempDir(root);
+		}
+	});
+
+	it("returns an earlier consumed request when a later request cannot be parsed", () => {
+		const root = createTempDir("pi-chain-append-malformed-");
+		const dir = path.join(root, "append-requests");
+		fs.mkdirSync(dir);
+		try {
+			fs.writeFileSync(path.join(dir, "100-a.json"), JSON.stringify({ id: "a", createdAt: 100, steps: [runnerStep("worker")] }));
+			fs.writeFileSync(path.join(dir, "100-b.json"), "{");
+			const consumed = consumeChainAppendRequests(root);
+			assert.deepEqual(consumed.requests.map((request) => request.id), ["a"]);
+			assert.match(consumed.error ?? "", /Failed to consume chain append request '100-b.json'/);
+			assert.deepEqual(fs.readdirSync(dir), ["100-b.json"]);
 		} finally {
 			removeTempDir(root);
 		}

@@ -96,6 +96,14 @@ For background work, pass `async: true`. Inspect it with `subagent({ action: "st
 
 For a scoped fan-in across independently launched async runs, use `subagent_wait({ ids: ["run-a", "run-b"], all: true })`. Omit `all` to wait for the first selected completion or attention. The selection uses 1–100 unique exact async IDs from the current session and excludes unrelated work; already-terminal selected runs do not extend the wait. Use `id` instead for one prefix or remembered detached foreground run.
 
+For appended background-chain steps, a queue-file removal failure does not authorize
+execution. Accepted steps can finish while blocked requests remain queued for the
+next step boundary. If the queue is still blocked when accepted work drains, both
+status and result artifacts report failure with the request filename and error.
+Inspect the retained `append-requests` files and fix the filesystem problem before
+explicitly recovering unfinished work; terminal runs do not automatically replay
+those requests. This is not a crash-safe exactly-once delivery guarantee.
+
 ## Built-in roles
 
 | Role | Purpose |

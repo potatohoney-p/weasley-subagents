@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Consume appended chain work only after its queue file is removed successfully. Preserve partial batches and pending requests on filesystem errors, and report a failed run instead of success when append work remains blocked after accepted steps finish.
 - Preserve stopped, paused, timed-out, and checkpoint-rejected outcomes when rebuilding stale async status from persisted results.
 - Keep rejected nested runs and steps terminal in the parent projection after restart or delayed progress delivery.
 - Publish synthetic stale-run results only when no result already exists, preserving real results that arrive during liveness checks. Exclusive publication requires hard-link support on the result filesystem and reports an error without replacing files when unavailable.
