@@ -431,7 +431,12 @@ export class ScheduledRunManager {
 		this.clearTimer(job.id);
 		const delayMs = Math.max(0, job.runAt - this.now());
 		const timer = this.timersApi.setTimeout(() => {
-			void this.fire(job.id);
+			void this.fire(job.id).catch((error: unknown) => {
+				// Timer callbacks have no awaiting caller. Storage failures must not
+				// become unhandled rejections in the extension host. Do not retry:
+				// a launch may already have happened before its result write failed.
+				console.error(`Scheduled subagent run ${job.id} failed; not retried automatically. Inspect its store and async run before resuming.`, error);
+			});
 		}, Math.min(delayMs, MAX_TIMER_DELAY_MS));
 		timer.unref?.();
 		this.timers.set(job.id, timer);
