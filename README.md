@@ -186,6 +186,8 @@ Project-scoped runs write under `.weasley-subagents/` by default. Async runs exp
 - `output-<index>.log` — bounded child output
 - `subagent-log-<runId>.md` — human-readable run summary
 
+Scheduled timer storage failures are logged without terminating the extension host. The failed timer is not retried automatically: a launch may have succeeded before its result could be saved. Inspect `schedule-status` and the async run artifacts, repair the storage problem, then reload the originating session to re-arm still-scheduled jobs (subject to the existing lateness limit). A stored `running` job is not automatically relaunched; reconcile its actual run before scheduling replacement work.
+
 Treat these files as local operational data. They are ignored by this repository and should not be committed unless deliberately sanitized.
 
 ## Safety model
