@@ -45,6 +45,10 @@ function validProcessInstance(value: unknown, kind?: "runner" | "pi-writer"): va
 		: typeof value.attempt === "number" && Number.isInteger(value.attempt) && value.attempt >= 0;
 }
 
+function uniqueProcessIdentities(instances: ProcessInstanceExitV1[]): boolean {
+	return new Set(instances.map((instance) => instance.processInstanceId)).size === instances.length;
+}
+
 function validInstance(value: unknown): value is ProcessInstanceExitV1 {
 	return validProcessInstance(value, "pi-writer");
 }
@@ -71,6 +75,10 @@ export function readProcessTerminalCandidate(asyncDir: string): ProcessTerminalC
 		for (const [index, entries] of Object.entries(raw.writers)) {
 			if (!Array.isArray(entries) || !entries.every(validInstance)) throw new Error(`Invalid writer process records for child '${index}'.`);
 			writers[index] = entries;
+		}
+		const writerInstances = Object.values(writers).flat();
+		if (!uniqueProcessIdentities(writerInstances) || writerInstances.some((instance) => instance.processInstanceId === raw.runnerProcessInstanceId)) {
+			throw new Error("Duplicate process identities in process-terminal candidate.");
 		}
 		let expectedWriters: Record<string, number> | undefined;
 		if (raw.expectedWriters !== undefined) {
@@ -137,13 +145,15 @@ function validateProof(raw: unknown, asyncDir: string, fallback?: { runId?: stri
 	}
 	if (fallback?.runId && raw.runId !== fallback.runId) throw new Error(`Process-terminal proof in '${asyncDir}' belongs to run '${raw.runId}', expected '${fallback.runId}'.`);
 	if (fallback?.runnerProcessInstanceId && raw.runnerProcessInstanceId !== fallback.runnerProcessInstanceId) throw new Error(`Process-terminal proof in '${asyncDir}' belongs to runner '${raw.runnerProcessInstanceId}', expected '${fallback.runnerProcessInstanceId}'.`);
-	if (raw.instances !== undefined && (!Array.isArray(raw.instances) || !raw.instances.every((entry) => validProcessInstance(entry)))) {
+	if (raw.instances !== undefined && (!Array.isArray(raw.instances) || !raw.instances.every((entry) => validProcessInstance(entry)) || !uniqueProcessIdentities(raw.instances))) {
 		throw new Error(`Invalid process-terminal instances in '${asyncDir}'.`);
 	}
 	if (raw.state === "observed") {
 		if (typeof raw.observedAt !== "number" || !Number.isFinite(raw.observedAt)) throw new Error(`Observed process-terminal proof in '${asyncDir}' is missing observedAt.`);
 		if (!Array.isArray(raw.instances)) throw new Error(`Observed process-terminal proof in '${asyncDir}' is missing instances.`);
-		const runner = raw.instances.find((entry) => isRecord(entry) && entry.kind === "runner");
+		const runners = raw.instances.filter((entry) => isRecord(entry) && entry.kind === "runner");
+		if (runners.length !== 1) throw new Error(`Observed process-terminal proof in '${asyncDir}' must have exactly one runner instance.`);
+		const runner = runners[0];
 		if (!validProcessInstance(runner, "runner") || runner.processInstanceId !== raw.runnerProcessInstanceId) throw new Error(`Observed process-terminal proof in '${asyncDir}' has no matching runner instance.`);
 	}
 	if (raw.resumeDisposition !== undefined && !["resumable", "non-resumable", "unavailable"].includes(String(raw.resumeDisposition))) throw new Error(`Invalid process-terminal resume disposition in '${asyncDir}'.`);
