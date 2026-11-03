@@ -24,6 +24,7 @@ import type { CompletionNotifier, CompletionNotification } from "./notify.ts";
 const WATCHER_RESTART_DELAY_MS = 3000;
 const POLL_INTERVAL_MS = 3000;
 const RETRY_DELAY_MS = 100;
+const RETRYABLE_RESULT_READ_CODES = new Set(["EACCES", "EBUSY", "EIO", "EMFILE", "ENFILE", "EPERM"]);
 
 type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "unlinkSync" | "readdirSync" | "mkdirSync" | "realpathSync" | "watch">;
 
@@ -137,12 +138,28 @@ export function createResultWatcher(
 
 	const handleResult = async (file: string, triggerTurn: boolean) => {
 		const resultPath = path.join(resultsDir, file);
-		if (processing.has(file) || !fsApi.existsSync(resultPath)) return;
+		if (processing.has(file) || !deliveryActive
+			|| (activeSessionId !== null && activeSessionId !== state.currentSessionId)) return;
 		processing.add(file);
+		const epoch = deliveryEpoch;
 		try {
-			const data = JSON.parse(fsApi.readFileSync(resultPath, "utf-8")) as ResultFileData;
+			let raw: string;
+			try {
+				// Read directly: existsSync hides access errors as absence, and a
+				// healthy watcher need not emit another event after a failed read.
+				raw = fsApi.readFileSync(resultPath, "utf-8");
+			} catch (error) {
+				if (!isNotFound(error)) {
+					console.error(`Failed to read subagent result file '${resultPath}':`, error);
+					if (RETRYABLE_RESULT_READ_CODES.has(errorCode(error) ?? "")
+						&& deliveryActive && epoch === deliveryEpoch) {
+						scheduleResult(file, triggerTurn, POLL_INTERVAL_MS);
+					}
+				}
+				return;
+			}
+			const data = JSON.parse(raw) as ResultFileData;
 			if (typeof data.sessionId !== "string" || !data.sessionId) return;
-			const epoch = deliveryEpoch;
 			if (!ownsSession(data.sessionId, epoch)) return;
 
 			const runId = data.runId ?? data.id ?? file.replace(/\.json$/i, "");
