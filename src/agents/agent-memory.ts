@@ -14,6 +14,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { TextDecoder } from "node:util";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 import { findNearestProjectRoot, type AgentConfig, type AgentMemoryConfig } from "./agents.ts";
 
@@ -128,12 +129,20 @@ export function resolveMemoryDir(
 
 type MemoryFileResult = { contents: string; byteCapped: boolean } | "unsafe" | null;
 
+// Streaming decoding omits only a valid incomplete trailing sequence. Invalid
+// source sequences still produce replacement characters, and ignoreBOM retains
+// a literal leading BOM just like Buffer.toString("utf-8").
+function decodeUtf8Prefix(bytes: Uint8Array): string {
+	return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes, { stream: true });
+}
+
 function truncateMemory(raw: string): { text: string; byteCapped: boolean } {
 	const lines = raw.split("\n");
 	let text = lines.slice(0, MAX_MEMORY_LINES).join("\n");
 	let byteCapped = false;
 	if (Buffer.byteLength(text, "utf-8") > MAX_MEMORY_BYTES) {
-		text = Buffer.from(text, "utf-8").subarray(0, MAX_MEMORY_BYTES).toString("utf-8");
+		// Do not flush a partial trailing character introduced by the byte cap.
+		text = decodeUtf8Prefix(Buffer.from(text, "utf-8").subarray(0, MAX_MEMORY_BYTES));
 		byteCapped = true;
 	}
 	return { text, byteCapped };
@@ -172,9 +181,14 @@ export function readMemoryFile(memoryDir: string): MemoryFileResult {
 			}
 		}
 
-		const raw = Buffer.concat(chunks, totalBytes).subarray(0, MAX_MEMORY_BYTES).toString("utf-8");
+		const bytes = Buffer.concat(chunks, totalBytes).subarray(0, MAX_MEMORY_BYTES);
+		const byteCapped = totalBytes > MAX_MEMORY_BYTES;
+		// A byte-capped preview may end inside a valid UTF-8 sequence. Leave that
+		// incomplete character buffered instead of replacing it in the prompt. At
+		// the real end of an uncapped file, retain normal malformed-byte decoding.
+		const raw = byteCapped ? decodeUtf8Prefix(bytes) : bytes.toString("utf-8");
 		const truncated = truncateMemory(raw);
-		return { contents: truncated.text, byteCapped: totalBytes > MAX_MEMORY_BYTES || truncated.byteCapped };
+		return { contents: truncated.text, byteCapped: byteCapped || truncated.byteCapped };
 	} catch {
 		return null;
 	} finally {
