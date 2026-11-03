@@ -357,8 +357,16 @@ export function readSteerCapability(asyncDir: string, index: number): SteerCapab
 export function consumeSteerCapabilities(asyncDir: string, fsImpl: Pick<typeof fs, "existsSync" | "readdirSync" | "readFileSync"> = fs): SteerCapability[] {
 	const dir = steerCapabilitiesDir(asyncDir);
 	if (!fsImpl.existsSync(dir)) return [];
+	let entries: string[];
+	try {
+		entries = fsImpl.readdirSync(dir).filter((name) => /^\d+\.json$/.test(name)).sort();
+	} catch {
+		// Retry capability discovery on the next poll without blocking the
+		// independent acknowledgement inbox later in the same control check.
+		return [];
+	}
 	const capabilities: SteerCapability[] = [];
-	for (const entry of fsImpl.readdirSync(dir).filter((name) => /^\d+\.json$/.test(name)).sort()) {
+	for (const entry of entries) {
 		try {
 			const capability = parseSteerCapability(JSON.parse(fsImpl.readFileSync(path.join(dir, entry), "utf-8")));
 			if (capability) capabilities.push(capability);
