@@ -161,6 +161,7 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 
 interface PendingCompletion {
 	key: string;
+	sessionId: string;
 	details: SubagentNotifyDetails;
 	triggerTurn: boolean;
 	resolve(accepted: boolean): void;
@@ -256,7 +257,18 @@ export default function registerSubagentNotify(
 			item.resolve(accepted);
 		}
 	};
-	const emit = (items: PendingCompletion[]) => settle(items, sendCompletion(pi, items));
+	const emit = (items: PendingCompletion[]) => {
+		// A batch can outlive the session that queued it. Recheck at the actual
+		// send boundary, and leave rejected results eligible for owner recovery.
+		const currentSessionId = state.currentSessionId;
+		const owned: PendingCompletion[] = [];
+		const stale: PendingCompletion[] = [];
+		for (const item of items) {
+			(disposed || item.sessionId !== currentSessionId ? stale : owned).push(item);
+		}
+		settle(stale, false);
+		if (owned.length > 0) settle(owned, sendCompletion(pi, owned));
+	};
 	const getBatcher = (result: CompletionNotification) => {
 		const key = completionBatchKey(result);
 		let batcher = batchers.get(key);
@@ -287,6 +299,7 @@ export default function registerSubagentNotify(
 		pending.set(key, completion);
 		const item: PendingCompletion = {
 			key,
+			sessionId: result.sessionId,
 			details,
 			triggerTurn: result.triggerTurn !== false,
 			resolve,

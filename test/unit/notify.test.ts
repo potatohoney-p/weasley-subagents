@@ -53,12 +53,13 @@ function createBatchingPi(clock: ReturnType<typeof createFakeClock>, currentSess
 			sent.push({ message, options });
 		},
 	};
-	const notifier = registerSubagentNotify(pi as never, { currentSessionId }, {
+	const state: { currentSessionId: string | null } = { currentSessionId };
+	const notifier = registerSubagentNotify(pi as never, state, {
 		batchConfig: { enabled: true, debounceMs: 150, maxWaitMs: 1000, stragglerDebounceMs: 75, stragglerMaxWaitMs: 400, stragglerWindowMs: 2000 },
 		timers: clock.api,
 		now: clock.now,
 	});
-	return { events, sent, notifier, dispose: () => notifier.dispose() };
+	return { events, sent, notifier, state, dispose: () => notifier.dispose() };
 }
 
 interface FakeJob {
@@ -154,6 +155,93 @@ describe("registerSubagentNotify", () => {
 		assert.equal(await pending, false);
 		clock.advance(1000);
 		assert.equal(sent.length, 0);
+	});
+
+	for (const nextSessionId of ["session-b", null]) {
+		it(`rejects held completions when the active session becomes ${nextSessionId}`, async () => {
+			const clock = createFakeClock();
+			const { notifier, sent, state } = createBatchingPi(clock);
+			try {
+				const result = completionResult({ id: "session-switch", triggerTurn: false });
+				const first = notifier.deliver(result);
+				const duplicate = notifier.deliver(result);
+				assert.equal(first, duplicate);
+				state.currentSessionId = nextSessionId;
+				clock.advance(150);
+				assert.equal(await first, false);
+				assert.equal(await duplicate, false);
+				assert.equal(sent.length, 0);
+
+				// A rejected batch must not poison dedupe or retain an in-flight promise.
+				state.currentSessionId = "session-a";
+				const retry = notifier.deliver(result);
+				assert.notEqual(retry, first);
+				clock.advance(150);
+				assert.equal(await retry, true);
+				assert.equal(sent.length, 1);
+				assert.deepEqual(sent[0]!.options, { triggerTurn: false });
+				assert.equal(await notifier.deliver(result), true);
+				assert.equal(sent.length, 1);
+			} finally { notifier.dispose(); }
+		});
+	}
+
+	it("rejects an old batch while accepting the newly active session's batch", async () => {
+		const clock = createFakeClock();
+		const { notifier, sent, state } = createBatchingPi(clock);
+		try {
+			const old = notifier.deliver(completionResult({ id: "old", summary: "old result" }));
+			state.currentSessionId = "session-b";
+			const current = notifier.deliver(completionResult({ id: "current", sessionId: "session-b", summary: "new result" }));
+			clock.advance(150);
+			assert.equal(await old, false);
+			assert.equal(await current, true);
+			assert.equal(sent.length, 1);
+			assert.match((sent[0]!.message as { content: string }).content, /new result/);
+			assert.doesNotMatch((sent[0]!.message as { content: string }).content, /old result/);
+		} finally { notifier.dispose(); }
+	});
+
+	it("retains the original exact session identity even when the input object changes", async () => {
+		const clock = createFakeClock();
+		const { notifier, sent, state } = createBatchingPi(clock);
+		try {
+			const result = completionResult({ id: "mutated-session" });
+			const pending = notifier.deliver(result);
+			result.sessionId = "session-b";
+			state.currentSessionId = "session-b";
+			clock.advance(150);
+			assert.equal(await pending, false);
+			assert.equal(sent.length, 0);
+		} finally { notifier.dispose(); }
+	});
+
+	it("checks ownership for mixed exact identities that share a normalized batch key", async () => {
+		const clock = createFakeClock();
+		const { notifier, sent, state } = createBatchingPi(clock);
+		try {
+			const old = notifier.deliver(completionResult({ id: "exact-old", summary: "old result" }));
+			state.currentSessionId = " session-a ";
+			const current = notifier.deliver(completionResult({ id: "exact-current", sessionId: " session-a ", summary: "new result" }));
+			clock.advance(150);
+			assert.equal(await old, false);
+			assert.equal(await current, true);
+			assert.equal(sent.length, 1);
+			assert.doesNotMatch((sent[0]!.message as { content: string }).content, /old result/);
+		} finally { notifier.dispose(); }
+	});
+
+	it("still delivers a held batch when its originating session is active at emission", async () => {
+		const clock = createFakeClock();
+		const { notifier, sent, state } = createBatchingPi(clock);
+		try {
+			const pending = notifier.deliver(completionResult({ id: "return-before-emit" }));
+			state.currentSessionId = "session-b";
+			state.currentSessionId = "session-a";
+			clock.advance(150);
+			assert.equal(await pending, true);
+			assert.equal(sent.length, 1);
+		} finally { notifier.dispose(); }
 	});
 
 	it("wakes the originating session with recovered detached foreground output", () => {
