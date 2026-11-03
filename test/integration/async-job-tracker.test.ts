@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import fsDefault from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { getProjectArtifactsDir } from "../../src/shared/artifacts.ts";
@@ -114,6 +116,78 @@ function createUiContext() {
 }
 
 describe("async job tracker", { skip: !available ? "pi packages not available" : undefined }, () => {
+	for (const code of ["EIO", "EACCES", "EMFILE"]) {
+		it(`retains active jobs across ${code} status failures and recovers on later polls`, (t) => {
+			const asyncRoot = createTempDir("pi-async-job-io-retry-");
+			const state = createState();
+			const runDir = path.join(asyncRoot, "retry");
+			const statusPath = path.join(runDir, "status.json");
+			const errors: unknown[][] = [];
+			let failReads = false;
+			let failedReads = 0;
+			const readFileSync = fsDefault.readFileSync;
+			const writeStatus = (id: string, status = "running") => {
+				const dir = path.join(asyncRoot, id);
+				fs.mkdirSync(dir, { recursive: true });
+				fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({
+					runId: id, mode: "single", state: status, pid: process.pid,
+					startedAt: Date.now(), lastUpdate: Date.now(),
+					steps: [{ agent: "worker", status }],
+				}));
+			};
+			t.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.now() });
+			t.mock.method(console, "error", (...args: unknown[]) => errors.push(args));
+			t.mock.method(fsDefault, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+				if (failReads && String(args[0]) === statusPath) {
+					failedReads++;
+					throw Object.assign(new Error("status temporarily unavailable"), { code });
+				}
+				return Reflect.apply(readFileSync, fsDefault, args);
+			});
+			syncBuiltinESMExports();
+			const tracker = trackerMod!.createAsyncJobTracker(createEventRecorder().pi, state as never, asyncRoot, {
+				completionRetentionMs: 30, pollIntervalMs: 10, kill: () => true,
+				resultsDir: path.join(asyncRoot, "results"),
+			});
+			try {
+				writeStatus("retry");
+				writeStatus("healthy");
+				tracker.handleStarted({ id: "retry", asyncDir: runDir, agent: "worker" });
+				tracker.handleStarted({ id: "healthy", asyncDir: path.join(asyncRoot, "healthy"), agent: "worker" });
+				t.mock.timers.tick(10);
+				assert.equal(state.asyncJobs.get("retry")?.status, "running");
+				const updatedAt = state.asyncJobs.get("retry")?.updatedAt;
+				failReads = true;
+				writeStatus("healthy", "complete");
+				for (let i = 0; i < 12; i++) t.mock.timers.tick(10);
+				assert.ok(failedReads >= 10, "unavailable status remains eligible for polling beyond retention");
+				assert.equal(state.asyncJobs.get("retry")?.status, "running");
+				assert.equal(state.fleetJobs.get("retry")?.status, "running");
+				assert.equal(state.asyncJobs.get("retry")?.updatedAt, updatedAt);
+				assert.equal(state.cleanupTimers.has("retry"), false);
+				assert.equal(state.asyncJobs.has("healthy"), false, "healthy terminal siblings still clean up");
+				assert.equal(errors.length, 1, "a continuous outage is logged once");
+				failReads = false;
+				t.mock.timers.tick(10);
+				failReads = true;
+				t.mock.timers.tick(10);
+				assert.equal(errors.length, 2, "a new outage is visible after recovery");
+				failReads = false;
+				writeStatus("retry", "complete");
+				for (let i = 0; i < 5; i++) t.mock.timers.tick(10);
+				assert.equal(state.asyncJobs.has("retry"), false);
+				assert.equal(state.fleetJobs.get("retry")?.status, "complete");
+			} finally {
+				tracker.resetJobs();
+				if (state.poller) clearInterval(state.poller);
+				t.mock.restoreAll();
+				syncBuiltinESMExports();
+				t.mock.timers.reset();
+				removeTempDir(asyncRoot);
+			}
+		});
+	}
+
 	it("drops stale captured extension contexts instead of crashing background timers", () => {
 		const asyncRoot = createTempDir("pi-async-job-tracker-stale-context-");
 		try {

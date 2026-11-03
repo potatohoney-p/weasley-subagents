@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Keep tracked async runs at their last observed state when filesystem access fails, retry status polling after recovery, and log each continuous outage once instead of marking live work failed and expiring it.
 - Preserve stopped, paused, timed-out, and checkpoint-rejected outcomes when rebuilding stale async status from persisted results.
 - Keep rejected nested runs and steps terminal in the parent projection after restart or delayed progress delivery.
 - Publish synthetic stale-run results only when no result already exists, preserving real results that arrive during liveness checks. Exclusive publication requires hard-link support on the result filesystem and reports an error without replacing files when unavailable.

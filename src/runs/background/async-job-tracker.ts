@@ -35,6 +35,17 @@ const MAX_CONTROL_EVENT_LINE_BYTES = 1024 * 1024;
 const CONTROL_EVENT_SCAN_WINDOW_BYTES = 2 * 1024 * 1024;
 const MAX_RECENT_FLEET_JOBS = 20;
 
+function hasSystemErrorCode(error: unknown): boolean {
+	const seen = new Set<unknown>();
+	while (error && typeof error === "object" && !seen.has(error)) {
+		seen.add(error);
+		const current = error as { code?: unknown; cause?: unknown };
+		if (typeof current.code === "string" && /^E[A-Z0-9]+$/.test(current.code)) return true;
+		error = current.cause;
+	}
+	return false;
+}
+
 function rememberFleetJob(state: SubagentState, job: AsyncJobState): void {
 	state.fleetJobs ??= new Map();
 	state.fleetJobs.set(job.asyncId, job);
@@ -56,6 +67,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
 	const resultsDir = options.resultsDir ?? RESULTS_DIR;
 	const steeringNoticeSeen = new Map<string, number>();
+	const statusReadFailures = new Set<string>();
 	const rerenderWidget = (ctx: ExtensionContext, jobs = Array.from(state.asyncJobs.values())) => {
 		renderWidget(ctx, options.widgetEnabled === false ? [] : jobs);
 		ctx.ui.requestRender?.();
@@ -144,6 +156,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		const timer = setTimeout(() => {
 			state.cleanupTimers.delete(asyncId);
 			state.asyncJobs.delete(asyncId);
+			statusReadFailures.delete(asyncId);
 			rerenderLastWidget();
 		}, completionRetentionMs);
 		state.cleanupTimers.set(asyncId, timer);
@@ -318,6 +331,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 						},
 					});
 					const status = reconciliation.status ?? readStatus(job.asyncDir);
+					statusReadFailures.delete(job.asyncId);
 					if (status) {
 						const previousStatus = job.status;
 						job.status = status.state;
@@ -380,6 +394,16 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 						job.updatedAt = Date.now();
 					}
 				} catch (error) {
+					if (hasSystemErrorCode(error)) {
+						// Unavailable storage is not evidence that the run failed. Keep its
+						// last observed state and poll again instead of expiring live work.
+						if (!statusReadFailures.has(job.asyncId)) {
+							console.error(`Failed to read async status for '${job.asyncDir}'; will retry:`, error);
+							statusReadFailures.add(job.asyncId);
+						}
+						continue;
+					}
+					statusReadFailures.delete(job.asyncId);
 					if (job.status !== "failed") {
 						console.error(`Failed to read async status for '${job.asyncDir}':`, error);
 						job.status = "failed";
@@ -402,6 +426,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		const info = data as AsyncStartedEvent;
 		if (!info.id) return;
 		if (typeof state.currentSessionId === "string" && info.sessionId !== state.currentSessionId) return;
+		statusReadFailures.delete(info.id);
 		const now = Date.now();
 		const asyncDir = info.asyncDir ?? path.join(asyncDirRoot, info.id);
 		const rawAgents = info.agents?.length ? info.agents : info.chain && info.chain.length > 0 ? info.chain : info.agent ? [info.agent] : undefined;
@@ -468,6 +493,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			clearTimeout(timer);
 		}
 		state.cleanupTimers.clear();
+		statusReadFailures.clear();
 		state.asyncJobs.clear();
 		state.fleetJobs?.clear();
 		state.foregroundControls?.clear();
