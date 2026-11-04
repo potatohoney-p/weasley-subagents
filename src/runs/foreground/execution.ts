@@ -2,6 +2,7 @@
  * Core execution logic for running subagents
  */
 
+import { evaluateForegroundAcceptance } from "./acceptance-lifetime.ts";
 import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import * as path from "node:path";
@@ -86,7 +87,7 @@ import {
 	shouldEscalateMutatingFailures,
 	summarizeRecentMutatingFailures,
 } from "../shared/long-running-guard.ts";
-import { acceptanceFailureMessage, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, buildSkippedAcceptanceLedger, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
 import { attachContractProjections, isAgentContractV1 } from "../shared/agent-contract.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, turnBudgetDecision, turnBudgetDeferredNote, turnBudgetDeferredState, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
@@ -1333,6 +1334,7 @@ async function runSyncCompletion(
 	task: string,
 	options: RunSyncOptions,
 ): Promise<SingleResult> {
+	let acceptanceDeadlineAt: number | undefined;
 	options = {
 		...options,
 		capabilityCeiling: options.capabilityCeiling ?? resolveCurrentSubagentCapabilityCeiling(options.parentSessionId),
@@ -1481,7 +1483,10 @@ async function runSyncCompletion(
 		const candidate = modelsToTry[modelIndex];
 		for (let startupAttemptIndex = 0; ; startupAttemptIndex++) {
 			const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
-			const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, attemptOptions, {
+			// Preserve per-attempt timeout policy, but keep the final attempt's
+			// remaining time instead of granting verification a fresh timeout.
+			acceptanceDeadlineAt = options.deadlineAt ?? (options.timeoutMs !== undefined ? Date.now() + options.timeoutMs : undefined);
+			const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, { ...attemptOptions, deadlineAt: acceptanceDeadlineAt }, {
 				sessionEnabled,
 				systemPrompt,
 				resolvedSkillNames: resolvedSkills.length > 0 ? resolvedSkills.map((skill) => skill.name) : undefined,
@@ -1656,7 +1661,9 @@ async function runSyncCompletion(
 		} else if (result.turnBudgetExceeded) {
 			result.acceptance = buildSkippedAcceptanceLedger(effectiveAcceptance, { id: "turn-budget", message: "Acceptance was not evaluated because the subagent exceeded its turn budget." });
 		} else {
-			result.acceptance = await evaluateAcceptance({
+			// An already-paused child keeps its existing acceptance path; a pause
+			// must not later be reclassified as a failed or timed-out execution.
+			const evaluated = await evaluateForegroundAcceptance({
 				acceptance: effectiveAcceptance,
 				output: acceptanceOutputByResult.get(result) ?? result.finalOutput ?? "",
 				fileOutput: childWrittenOutput !== undefined && options.outputPath
@@ -1664,7 +1671,17 @@ async function runSyncCompletion(
 					: undefined,
 				cwd: options.cwd ?? runtimeCwd,
 				reportOptional: isAgentContractV1(options.agentContract),
-			});
+			}, result.interrupted ? {} : { signal: options.signal, deadlineAt: acceptanceDeadlineAt, timeoutMs: options.timeoutMs });
+			result.acceptance = evaluated.acceptance;
+			if (evaluated.interruption && result.exitCode === 0) {
+				result.exitCode = 1;
+				result.error = evaluated.interruption.message;
+				if (evaluated.interruption.timedOut) result.timedOut = true;
+				if (result.progress) {
+					result.progress.status = "failed";
+					result.progress.error = result.error;
+				}
+			}
 		}
 	} catch (error) {
 		const message = `Acceptance evaluation failed: ${error instanceof Error ? error.message : String(error)}`;

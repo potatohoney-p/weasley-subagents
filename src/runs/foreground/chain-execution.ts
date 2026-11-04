@@ -2,6 +2,7 @@
  * Chain execution logic for subagent tool
  */
 
+import { evaluateForegroundAcceptance } from "./acceptance-lifetime.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -83,7 +84,7 @@ import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, outputEntryFromResult, resolveOutputReferences, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection, type DynamicCollectedResult } from "../shared/dynamic-fanout.ts";
-import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, resolveEffectiveAcceptance } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, aggregateAcceptanceReport, resolveEffectiveAcceptance } from "../shared/acceptance.ts";
 import { isAgentContractV1 } from "../shared/agent-contract.ts";
 import type { ChainOutputMap } from "../../shared/types.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
@@ -1013,7 +1014,7 @@ ${step.message}` : ""}` }],
 						dynamicGroup: true,
 						agentContract: step.agentContract ?? params.agentContract,
 					});
-					const groupAcceptance = await evaluateAcceptance({
+					const evaluated = await evaluateForegroundAcceptance({
 						acceptance: effectiveGroupAcceptance,
 						output: "",
 						report: aggregateAcceptanceReport({
@@ -1022,7 +1023,12 @@ ${step.message}` : ""}` }],
 						}),
 						cwd: cwd ?? ctx.cwd,
 						reportOptional: isAgentContractV1(step.agentContract ?? params.agentContract),
-					});
+					}, { signal, deadlineAt, timeoutMs: params.timeoutMs });
+					const groupAcceptance = evaluated.acceptance;
+					if (evaluated.interruption) {
+						dynamicGroupStatuses[stepIndex] = { status: "failed", error: evaluated.interruption.message, acceptance: groupAcceptance };
+						return buildChainExecutionErrorResult(evaluated.interruption.message, makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: globalTaskIndex }));
+					}
 					dynamicGroupStatuses[stepIndex].acceptance = groupAcceptance;
 					const groupAcceptanceFailure = !isAgentContractV1(step.agentContract ?? params.agentContract) || step.gateOn === "acceptance" ? acceptanceFailureMessage(groupAcceptance) : undefined;
 					if (groupAcceptanceFailure) {
@@ -1206,7 +1212,7 @@ ${step.message}` : ""}` }],
 				dynamicGroup: true,
 				agentContract: step.agentContract ?? params.agentContract,
 			});
-			const groupAcceptance = await evaluateAcceptance({
+			const evaluated = await evaluateForegroundAcceptance({
 				acceptance: effectiveGroupAcceptance,
 				output: "",
 				report: aggregateAcceptanceReport({
@@ -1215,7 +1221,12 @@ ${step.message}` : ""}` }],
 				}),
 				cwd: cwd ?? ctx.cwd,
 				reportOptional: isAgentContractV1(step.agentContract ?? params.agentContract),
-			});
+			}, { signal, deadlineAt, timeoutMs: params.timeoutMs });
+			const groupAcceptance = evaluated.acceptance;
+			if (evaluated.interruption) {
+				dynamicGroupStatuses[stepIndex] = { status: "failed", error: evaluated.interruption.message, acceptance: groupAcceptance };
+				return buildChainExecutionErrorResult(evaluated.interruption.message, makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: dynamicStartIndex }));
+			}
 			dynamicGroupStatuses[stepIndex].acceptance = groupAcceptance;
 			const groupAcceptanceFailure = effectiveGroupAcceptance.explicit && (!isAgentContractV1(step.agentContract ?? params.agentContract) || step.gateOn === "acceptance") ? acceptanceFailureMessage(groupAcceptance) : undefined;
 			if (groupAcceptanceFailure) {
