@@ -686,8 +686,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const validationError = validateFileOnlyOutputMode(behavior.outputMode, outputPath, `Async step (${s.agent})`);
 		if (validationError) throw new AsyncStartValidationError(validationError);
 		let taskTemplate = s.task ?? "{previous}";
-		taskTemplate = taskTemplate.replace(/\{task\}/g, originalTask ?? "");
-		taskTemplate = taskTemplate.replace(/\{chain_dir\}/g, runnerCwd);
+		taskTemplate = taskTemplate.replace(/\{task\}/g, () => originalTask ?? "");
+		taskTemplate = taskTemplate.replace(/\{chain_dir\}/g, () => runnerCwd);
 		const taskText = `${readInstructions.prefix}${taskTemplate}${progressInstructions.suffix}`;
 		const task = namespaceOutputPath ? taskText : injectSingleOutputInstruction(taskText, outputPath, a);
 
