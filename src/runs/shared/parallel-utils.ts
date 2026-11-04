@@ -66,6 +66,8 @@ export interface RunnerCheckpointStep {
 
 export interface ParallelStepGroup {
 	parallel: RunnerSubagentStep[];
+	/** Resolved base directory for this group, including worktree setup. */
+	cwd?: string;
 	concurrency?: number;
 	failFast?: boolean;
 	worktree?: boolean;

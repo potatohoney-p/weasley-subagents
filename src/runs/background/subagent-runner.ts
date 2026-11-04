@@ -3515,6 +3515,7 @@ async function runSubagent(
 
 		if (isParallelGroup(step)) {
 			const group = step;
+			const groupCwd = group.cwd ? path.resolve(cwd, group.cwd) : cwd;
 			const concurrency = group.concurrency ?? MAX_PARALLEL_CONCURRENCY;
 			const failFast = group.failFast ?? false;
 			const groupStartFlatIndex = flatIndex;
@@ -3522,7 +3523,7 @@ async function runSubagent(
 			let worktreeSetup: WorktreeSetup | undefined;
 			let worktreeFinalized = false;
 			if (group.worktree) {
-				const worktreeTaskCwdConflict = findWorktreeTaskCwdConflict(group.parallel, cwd);
+				const worktreeTaskCwdConflict = findWorktreeTaskCwdConflict(group.parallel, groupCwd);
 				if (worktreeTaskCwdConflict) {
 					const failedAt = Date.now();
 					markParallelGroupSetupFailure({
@@ -3530,7 +3531,7 @@ async function runSubagent(
 						results,
 						group,
 						groupStartFlatIndex,
-						setupError: formatWorktreeTaskCwdConflict(worktreeTaskCwdConflict, cwd),
+						setupError: formatWorktreeTaskCwdConflict(worktreeTaskCwdConflict, groupCwd),
 						failedAt,
 						statusPath,
 						eventsPath,
@@ -3542,7 +3543,7 @@ async function runSubagent(
 					break;
 				}
 				try {
-					worktreeSetup = createWorktrees(cwd, `${id}-s${stepIndex}`, group.parallel.length, {
+					worktreeSetup = createWorktrees(groupCwd, `${id}-s${stepIndex}`, group.parallel.length, {
 						agents: group.parallel.map((task) => task.agent),
 						setupHook: config.worktreeSetupHook
 							? { hookPath: config.worktreeSetupHook, timeoutMs: config.worktreeSetupHookTimeoutMs }
@@ -3650,7 +3651,7 @@ async function runSubagent(
 						const taskSessionDir = config.sessionDir
 							? path.join(config.sessionDir, `parallel-${taskIdx}`)
 							: undefined;
-						const { taskForRun, taskCwd } = prepareParallelTaskRun(task, cwd, worktreeSetup, taskIdx);
+						const { taskForRun, taskCwd } = prepareParallelTaskRun(task, groupCwd, worktreeSetup, taskIdx);
 						flushPendingStepSteers(fi);
 
 						const singleResult = await runSingleStep(taskForRun, {
