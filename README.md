@@ -193,6 +193,7 @@ Treat these files as local operational data. They are ignored by this repository
 - Child agents do not automatically become orchestrators.
 - Tool and extension access can be narrowed per agent.
 - Worktree mode isolates parallel writers and records their diffs.
+- A static parallel chain group's `cwd` is resolved against the run directory. Its tasks inherit that directory and resolve their own relative `cwd` beneath it; absolute task directories remain absolute. Worktree groups use the selected group directory's repository and subdirectory, and still reject conflicting task directories.
 - Completion and acceptance guards distinguish attempted work from verified work.
 - Spawn, depth, concurrency, turn, tool, and usage budgets can constrain runs.
 - Scheduled execution is disabled by default.
