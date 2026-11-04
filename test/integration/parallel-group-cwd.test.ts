@@ -138,7 +138,7 @@ describe("static parallel group working directories", () => {
 			assert.equal(result.parallelHandoff?.cleanupState, "complete");
 			assert.ok(result.parallelHandoff?.path);
 			const handoff = JSON.parse(fs.readFileSync(result.parallelHandoff.path, "utf8")) as ParallelHandoffManifest;
-			assert.equal(path.resolve(handoff.groups[0]!.repoRoot), path.resolve(repo));
+			assert.equal(fs.realpathSync.native(handoff.groups[0]!.repoRoot), fs.realpathSync.native(repo));
 			const patch = fs.readFileSync(handoff.groups[0]!.children[0]!.patch.path, "utf8");
 			assert.match(patch, /b\/packages\/ui\/child\.txt/);
 			assert.equal(fs.existsSync(path.join(packageDir, "child.txt")), false, "source checkout remains untouched");
