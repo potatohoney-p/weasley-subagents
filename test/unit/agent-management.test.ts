@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { handleCreate, handleList, handleManagementAction, handleUpdate } from "../../src/agents/agent-management.ts";
 import { clearSkillCache } from "../../src/agents/skills.ts";
+import { discoverAgentsAll } from "../../src/agents/agents.ts";
 
 let tempDir = "";
 let oldAgentDir: string | undefined;
@@ -32,6 +33,24 @@ describe("agent management config parsing", () => {
 		else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
 		clearSkillCache();
 		fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("preserves fenced workflow examples through creation, discovery, and metadata updates", () => {
+		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } } as unknown as Parameters<typeof handleCreate>[1];
+		const task = "Implement this example:\n\n```markdown\n## example-agent\noutput: example.md\n\nExample task.\n```\n\nKeep the example intact.";
+		const steps = [{ agent: "worker", task }, { agent: "reviewer", task: "Review the result." }];
+		const created = handleCreate({ config: {
+			name: "fenced-workflow", description: "Fenced examples", scope: "project", steps,
+		} }, ctx);
+		assert.match(readText(created), /Created chain 'fenced-workflow'/);
+		const discover = () => discoverAgentsAll(tempDir).chains.find((chain) => chain.name === "fenced-workflow");
+		assert.deepEqual(discover()?.steps, steps);
+		for (const description of ["Updated description", "Updated again"]) {
+			const updated = handleUpdate({ chainName: "fenced-workflow", agentScope: "project", config: { description } }, ctx);
+			assert.match(readText(updated), /Updated chain 'fenced-workflow'/);
+			assert.equal(discover()?.description, description);
+			assert.deepEqual(discover()?.steps, steps);
+		}
 	});
 
 	it("surfaces JSON parse errors for create config strings", () => {
