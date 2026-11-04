@@ -486,11 +486,15 @@ function captureWorktreeDiff(
 	removeSyntheticPathsBeforeDiff(worktree);
 	runGitChecked(worktree.path, ["add", "-A"]);
 	const diffStat = runGitChecked(worktree.path, ["diff", "--cached", "--stat", setup.baseCommit]).trim();
-	const patch = runGitChecked(worktree.path, ["diff", "--cached", setup.baseCommit]);
+	// Write an applicable patch directly to disk: presentation helpers can omit
+	// binary payloads, and large patches exceed spawnSync's stdout buffer limit.
+	runGitChecked(worktree.path, [
+		"diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv",
+		`--output=${path.resolve(patchPath)}`, setup.baseCommit,
+	]);
 	const numstat = runGitChecked(worktree.path, ["diff", "--cached", "--numstat", setup.baseCommit]);
-	fs.writeFileSync(patchPath, patch, "utf-8");
 
-	if (!patch.trim()) {
+	if (fs.statSync(patchPath).size === 0) {
 		return emptyDiff(worktree.index, agent, worktree.branch, patchPath);
 	}
 
