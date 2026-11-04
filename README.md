@@ -111,6 +111,14 @@ For a scoped fan-in across independently launched async runs, use `subagent_wait
 
 Agents can be defined at package, user, or project scope. Project definitions can live in `.pi/agents/`; user definitions can live in `~/.pi/agent/agents/`.
 
+Saved `.chain.md` workflows use top-level `## agent-name` headings to separate
+steps. Headings inside backtick or tilde fenced code blocks remain part of the
+current task, so Markdown examples survive loading and metadata updates. Close
+each fence before the next real step; an unclosed fence includes the rest of the
+file in its example. Fence delimiters may have up to three leading spaces, and a
+closing delimiter must use the same character at least as many times as the
+opening delimiter. This does not introduce general Markdown nesting support.
+
 ## Configuration
 
 Primary settings live in Pi's user or project settings under `subagents`. Extension runtime controls live here:

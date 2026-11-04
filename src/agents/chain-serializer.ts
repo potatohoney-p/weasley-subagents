@@ -98,23 +98,45 @@ function parseStepBody(agent: string, sectionBody: string): ChainStepConfig {
 	return step;
 }
 
+function findMarkdownSteps(body: string): Array<{ agent: string; start: number; bodyStart: number }> {
+	const steps: Array<{ agent: string; start: number; bodyStart: number }> = [];
+	let fence: { marker: string; length: number } | undefined;
+	let offset = 0;
+	for (const line of body.split("\n")) {
+		// A top-level Markdown fence may be indented by up to three spaces.
+		// Only a matching marker of at least the opening length can close it.
+		const delimiter = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+		if (fence) {
+			if (delimiter && delimiter[1]![0] === fence.marker
+				&& delimiter[1]!.length >= fence.length && /^[ \t]*$/.test(delimiter[2]!)) {
+				fence = undefined;
+			}
+		} else if (delimiter && (delimiter[1]![0] === "~" || !delimiter[2]!.includes("`"))) {
+			// Backtick fence info strings cannot themselves contain backticks.
+			fence = { marker: delimiter[1]![0]!, length: delimiter[1]!.length };
+		} else {
+			const heading = line.match(/^##\s+(.+)[^\S\n]*$/);
+			if (heading) steps.push({ agent: heading[1]!.trim(), start: offset, bodyStart: offset + line.length + 1 });
+		}
+		offset += line.length + 1;
+	}
+	return steps;
+}
+
 export function parseChain(content: string, source: AgentSource, filePath: string): ChainConfig {
 	const { frontmatter, body } = parseFrontmatter(content);
 	if (!frontmatter.name || !frontmatter.description) {
 		throw new Error("Chain frontmatter must include name and description");
 	}
 
-	const matches = [...body.matchAll(/^##\s+(.+)[^\S\n]*$/gm)];
+	const matches = findMarkdownSteps(body);
 	const steps: ChainStepConfig[] = [];
 
 	for (let i = 0; i < matches.length; i++) {
 		const match = matches[i]!;
-		const agent = match[1]!.trim();
-		const lineEndOffset = body[match.index! + match[0].length] === "\n" ? 1 : 0;
-		const sectionStart = match.index! + match[0].length + lineEndOffset;
-		const sectionEnd = i + 1 < matches.length ? matches[i + 1]!.index! : body.length;
-		const sectionBody = body.slice(sectionStart, sectionEnd).trimEnd();
-		steps.push(parseStepBody(agent, sectionBody));
+		const sectionEnd = i + 1 < matches.length ? matches[i + 1]!.start : body.length;
+		const sectionBody = body.slice(match.bodyStart, sectionEnd).trimEnd();
+		steps.push(parseStepBody(match.agent, sectionBody));
 	}
 
 	const localName = frontmatter.name;
