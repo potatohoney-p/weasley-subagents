@@ -20,6 +20,7 @@ Weasley Subagents is an open-source Pi extension for coordinating specialized ch
 ## Requirements
 
 - Node.js 22.19 or newer
+- Git 2.11 or newer for watchdog repository-change detection
 - Pi from `@earendil-works/pi-coding-agent`
 - Access to at least one model configured in Pi
 
