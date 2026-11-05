@@ -140,20 +140,47 @@ function hashPath(root: string, relPath: string, budget: HashBudget): unknown {
 	return { path: normalized, state: "other", mode: stat.mode };
 }
 
-function parsePorcelainZ(raw: string): Array<{ status: string; paths: string[] }> {
-	const tokens = raw.split("\0").filter(Boolean);
-	const entries: Array<{ status: string; paths: string[] }> = [];
+interface GitStatusEntry {
+	status: string;
+	paths: string[];
+	/** HEAD/index modes and object IDs, including every unmerged stage. */
+	trackedState?: string[];
+}
+
+function parsePorcelainZ(raw: string): GitStatusEntry[] {
+	const tokens = raw.split("\0");
+	const entries: GitStatusEntry[] = [];
 	for (let index = 0; index < tokens.length; index++) {
 		const token = tokens[index]!;
-		if (token.length < 4) continue;
-		const status = token.slice(0, 2);
-		const relPath = token.slice(3);
-		const paths = [relPath];
-		if (status[0] === "R" || status[0] === "C") {
+		if (token.startsWith("? ")) {
+			entries.push({ status: "??", paths: [token.slice(2)] });
+			continue;
+		}
+		// Porcelain v2 puts fixed, space-delimited metadata before the path.
+		// Only split that prefix: paths can contain spaces, tabs and newlines.
+		const fieldCount = token.startsWith("1 ") ? 8 : token.startsWith("2 ") ? 9 : token.startsWith("u ") ? 10 : undefined;
+		if (fieldCount === undefined) continue;
+		let pathStart = 0;
+		const fields: string[] = [];
+		for (let field = 0; field < fieldCount; field++) {
+			const separator = token.indexOf(" ", pathStart);
+			if (separator < 0) break;
+			fields.push(token.slice(pathStart, separator));
+			pathStart = separator + 1;
+		}
+		if (fields.length !== fieldCount) continue;
+		const paths = [token.slice(pathStart)];
+		if (fields[0] === "2") {
 			const originalPath = tokens[++index];
 			if (originalPath) paths.push(originalPath);
 		}
-		entries.push({ status, paths });
+		entries.push({
+			status: fields[1]!.replaceAll(".", " "),
+			paths,
+			// Exclude submodule flags and rename similarity scores. Submodule
+			// contents retain their intentionally opaque worktree summary.
+			trackedState: fields.slice(3, fields[0] === "2" ? 8 : fieldCount),
+		});
 	}
 	return entries;
 }
@@ -162,6 +189,7 @@ function buildRepoChangeSignature(root: string, statusOutput: string): WatchdogR
 	const entries = parsePorcelainZ(statusOutput)
 		.map((entry) => ({
 			status: entry.status,
+			trackedState: entry.trackedState,
 			paths: entry.paths.map(normalizeRelPath).filter((relPath) => !ignoredRelPath(relPath)),
 		}))
 		.filter((entry) => entry.paths.length > 0)
@@ -170,6 +198,7 @@ function buildRepoChangeSignature(root: string, statusOutput: string): WatchdogR
 	const budget: HashBudget = { entries: 0, bytes: 0, maxEntries: maxHashEntries(), maxBytes: maxHashTotalBytes() };
 	const payload = entries.map((entry) => ({
 		status: entry.status,
+		trackedState: entry.trackedState,
 		paths: entry.paths,
 		content: entry.paths.map((relPath) => hashPath(root, relPath, budget)),
 	}));
@@ -180,7 +209,7 @@ function buildRepoChangeSignature(root: string, statusOutput: string): WatchdogR
 export function computeWatchdogRepoChangeSignature(cwd: string): WatchdogRepoChangeSignature | undefined {
 	const root = git(cwd, ["rev-parse", "--show-toplevel"])?.trim();
 	if (!root) return undefined;
-	const statusOutput = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+	const statusOutput = git(root, ["status", "--porcelain=v2", "-z", "--untracked-files=all"]);
 	if (statusOutput === undefined) return undefined;
 	try {
 		return buildRepoChangeSignature(root, statusOutput);
